@@ -1,15 +1,17 @@
 # CM & CDH Prerequisites Checker
 
+[![Build Status](https://travis-ci.org/cloudera-ps/prereq-checks.svg?branch=master)](https://travis-ci.org/cloudera-ps/prereq-checks)
+
 Bash script for displaying relevant system information and performing
 prerequisite checks for Cloudera Manager & CDH installation.
 
-Motivation: Ensuring that the long list of required and recommended
+**Motivation**: Ensuring that the long list of required and recommended
 prerequisites are correctly applied during a [Hadoop Cluster
 Deployment](http://www.cloudera.com/content/www/en-us/services-support/professional-services/cluster-certification.html)
 (or similar) engagement is manual, time-consuming, and error-prone (not to
 mention mind-numbing).
 
-Non-Goals: This is not intended to replace or compete with the
+**Non-Goals**: This is not intended to replace or compete with the
 [Cloudera Support Interface (CSI)](http://blog.cloudera.com/blog/2014/02/secrets-of-cloudera-support-inside-our-own-enterprise-data-hub/),
 which includes a detailed cluster validation report.
 
@@ -28,7 +30,7 @@ And here's the output on the same server after addressing all the issues:
 
 # How to run this checker
 
-Currently there are two ways to run this script.
+Currently there are two ways to run this script:
 The first method is to obtain the inspection result from a single host targeting
 the host that executed the script.
 The second method is to obtain the inspection results from multiple hosts
@@ -40,120 +42,95 @@ the multiple target hosts.
 1. For using the distributed mode, run
 `    yum install ansible`
 2. For using the AD domain controller checks, run
-`    yum install perl-Convert-ASN1`
+`    yum install perl-Convert-ASN1 bind-utils`
 3. For using the AD delegated user privilege checks, run
 `    yum install openldap-clients`
 
-## Running it locally
+## Running it
 
 Running the script is easy as it is intentionally written in Bash to avoid any
 dependencies. This is to avoid dependency hell in restrictive customer
-environments.
+environments. It does not run on Mac OS. Tested on RHEL/CentOS 6.7 and 7.3 - see
+the [vagrant/](vagrant/) subfolder for details. Requires root/superuser
+permissions to run.
 
-Note that it does not run on Mac OS and has only been tested on RHEL/CentOS 6.5
-and 7.3 so far. Your Mileage May Vary.
+### Option A - Dev version
 
-It requires root/superuser permissions for some commands.
+To run:
 
-First check out the repository and switch into the newly created directory:
+    ./prereq-check-dev.sh
 
-    git clone https://github.com/cloudera-ps/prereq-checks.git
-    cd prereq-checks
+This requires the libraries in `lib/`, which includes both Bash and Perl
+libraries. See Usage for details.
 
-### Option A
+### Option B - Single file version
 
-Simply execute the script:
+To build/update the single file version of the script, run:
 
-    ./prereq-check.sh
+    ./build.sh
 
-It requires the libraries in `lib/`, as breaking down the code into several
-files makes them easier to maintain. If you rather copy around a single file
-instead, use Option B.
+This produces the file `prereq-check.sh`. See Usage for details.
 
-### Option B
+Usage for `build.sh`:
 
-To build the single file version of the script, run:
+```
+% ./build.sh -h
+NAME:
+  build.sh - prereq-check.sh build script
 
-    ./build-single.sh
+SYNOPSIS:
+  build.sh [options]
 
-This produces the file `prereq-check-single.sh`, which is the exact same code
-just with all the libs concatenated into a single file so it's easier to handle.
-Simply execute it like in Option A:
+OPTIONS:
+  -h, --help
+    Show this message
 
-    ./prereq-check-single.sh
+  -a, --auto-build
+    Watch dependencies for changes and automatically rebuild on changes
+```
 
-## Invocations
+With the `-a` option, the build script can watch dependencies and automatically
+rebuild the combined `prereq-check.sh`. It also runs `shellcheck` (Bash Lint) if
+it's installed. For example:
 
-| Command | |
-| --- | --- |
-| ./prereq-check.sh | run system check (default) |
-| ./prereq-check.sh --help | show usage |
-| ./prereq-chesk.sh --addc &lt;domain&gt; | run AD domain controller related checks |
-| ./prereq-chesk.sh --usertest &lt;domain&gt; | run tests against Active Directory delegated user for Direct to AD integration |
+```
+% ./build.sh -a
+Sun Aug 20 11:21:19 SGT 2017 [INFO] Found 'shellcheck', will run post-build Bash lint
+Sun Aug 20 11:21:19 SGT 2017 [INFO] Watching dependencies for changes...
+Sun Aug 20 11:21:32 SGT 2017 [INFO] Wrote to prereq-check.sh and updated Vagrant hard-links
+Sun Aug 20 11:21:32 SGT 2017 [INFO] Running 'shellcheck prereq-check.sh'...
+Sun Aug 20 11:21:33 SGT 2017 [INFO] shellcheck: All good
+Sun Aug 20 11:21:41 SGT 2017 [INFO] Wrote to prereq-check.sh and updated Vagrant hard-links
+Sun Aug 20 11:21:41 SGT 2017 [INFO] Running 'shellcheck prereq-check.sh'...
 
-## Running it with Ansible
+In prereq-check.sh line 1434:
+unused_var=
+^-- SC2034: unused_var appears unused. Verify it or export it.
 
-Prerequisites checker is also implemented as an Ansible role.
-Your Ansible installation should be able to find the `prereq-checks`
-ansible role included in this project.
-The easiest way is to have a simple `ansible.cfg` file like this:
+Sun Aug 20 11:21:42 SGT 2017 [INFO] shellcheck: Found above warnings/errors
+```
 
-    [defaults]
-    hostfile = inventory/hosts
-    host_key_checking = False
-    roles_path = roles
+## Usage
 
-Ansible needs inventory files properly configured to work.
-At least you have to change `hosts` file to list the target hosts
-you would like to inspect.
+```
+$ ./prereq-check.sh -h
+NAME:
+  prereq-check.sh - Cloudera Manager & CDH Prerequisites Checks v1.4.1
 
-    % cat inventory/hosts
-    #
-    # See Ansible Documentation > Inventory > Hosts and Groups
-    # http://docs.ansible.com/ansible/latest/intro_inventory.html#hosts-and-groups
-    #
-    rack01-node01.example.com
-    rack01-node02.example.com
-    rack01-node03.example.com
-    rack01-node04.example.com
-    rack02-node01.example.com
-    rack02-node02.example.com
-    rack02-node03.example.com
-    rack02-node04.example.com
+SYNOPSIS:
+  prereq-check.sh [options]
 
-A sample ansible playbook is provided as `prereq-check.yml`:
+OPTIONS:
+  -h, --help
+    Show this message
 
-    ---
-    - hosts: all
-      strategy: free
-      gather_facts: no
-      become: yes
-      become_user: root
+  -a, --addc domain
+    Run tests against Active Directory Domain Controller
 
-      vars:
-        outputdir: out
-
-      roles:
-        - prereq-checks
-
-You can control the output directory for the inspection results by
-assigning a desired path to the `outputdir` variable.
-The inspection results are stored at the current directory `./` by default.
-
-Running the above play book will generate the output files under the
-`./out/` directory:
-
-    % ansible-playbook prereq-check.yml
-
-Each inspection result file has a name of `<hostname>.out` where
-&lt;hostname&gt; is substituted by the name in `hosts` inventory file:
-
-    % ls ./out
-    rack01-node01.example.com.out	rack02-node01.example.com.out
-    rack01-node02.example.com.out	rack02-node02.example.com.out
-    rack01-node03.example.com.out	rack02-node03.example.com.out
-    rack01-node04.example.com.out	rack02-node04.example.com.out
-
+  -p, --privilegetest ldapURI binddn searchbase bind_user_password
+    Run tests against Active Directory delegated user for Direct to AD integration
+    http://blog.cloudera.com/blog/2014/07/new-in-cloudera-manager-5-1-direct-active-directory-integration-for-kerberos-authentication/
+```
 
 ## Contributions
 
