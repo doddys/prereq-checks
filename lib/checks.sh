@@ -118,6 +118,18 @@ function check_os() (
         fi
     }
 
+    function check_overcommit_memory() {
+        # https://www.cloudera.com/documentation/enterprise/5-15-x/topics/impala_scalability.html#kerberos_overhead_memory_usage
+        local overcommit_memory
+        local msg="System: /proc/sys/vm/overcommit_memory should be 1"
+        overcommit_memory=$(cat /proc/sys/vm/overcommit_memory)
+        if [ "$overcommit_memory" -eq 1 ]; then
+            state "$msg" 0
+        else
+            state "$msg. Actual: $overcommit_memory" 1
+        fi
+    }
+
     function check_tuned() {
         # "tuned" service should be disabled on RHEL/CentOS 7.x
         # https://www.cloudera.com/documentation/enterprise/latest/topics/cdh_admin_performance.html#xd_583c10bfdbd326ba-7dae4aa6-147c30d0933--7fd5__disable-tuned
@@ -186,6 +198,10 @@ function check_os() (
                 _check_service_is_not_running 'System' 'chronyd'
             else
                 _check_service_is_running 'System' 'chronyd'
+                get_service_state 'chronyd'
+                if [ "${SERVICE_STATE['running']}" = true ]; then
+                    state "System: kudu supports only ntpd. If kudu is not used, this warning can be ignored." 2
+                fi
             fi
         else
             _check_service_is_running 'System' 'ntpd'
@@ -237,6 +253,7 @@ function check_os() (
         fi
     }
     check_swappiness
+    check_overcommit_memory
     check_tuned
     check_thp
     check_selinux
@@ -465,10 +482,19 @@ function check_firewall() {
     fi
 }
 
+function check_virt() {
+        local msg="System: Non BareMetal deployments should follow appropriate Reference Architecures -- Please see https://bit.ly/2CTLeWB"
+        case $(systemd-detect-virt) in
+            none) state "System: Running on Bare Metal" 0;;
+            *)                   state "$msg" 2;;
+        esac
+}
+
 function checks() (
     print_header "Prerequisite checks"
     reset_service_state
     check_os
+    check_virt
     check_network
     check_firewall
     check_java
