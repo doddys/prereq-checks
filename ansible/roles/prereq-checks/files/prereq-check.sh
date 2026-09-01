@@ -1822,6 +1822,76 @@ function check_sudo() {
     fi
 }
 
+function check_krb5_realms() {
+    # KDC hostname resolution. In real CDP deployments the backing KDC is
+    # very often Active Directory or FreeIPA, but kdc=/admin_server=
+    # entries in /etc/krb5.conf's [realms] block are still commonly
+    # assigned manually (not always left to dns_lookup_kdc DNS-SRV
+    # discovery) — a copy-paste/typo'd hostname there is invisible until
+    # Kerberos auth is actually attempted. This exercises standard
+    # krb5.conf(5) semantics plus DNS, not a Cloudera-specific version or
+    # OS threshold, so unlike the checks above it isn't tied to a single
+    # docs.cloudera.com citation.
+    # No-op if Kerberos isn't configured on this host at all. Note that
+    # /etc/krb5.conf existing is NOT sufficient evidence of that: the
+    # krb5-libs RPM ships a stub /etc/krb5.conf (fully commented-out
+    # [realms]/default_realm) on every RHEL/Rocky host regardless of
+    # whether Kerberos is actually in use, so a bare "-f /etc/krb5.conf"
+    # gate produces a false FAIL on every non-Kerberized host. Require an
+    # active (uncommented) default_realm in [libdefaults] instead, as the
+    # signal that Kerberos is genuinely configured here.
+    if [ ! -f /etc/krb5.conf ]; then
+        return 0
+    fi
+    local default_realm
+    default_realm=$(awk '/^[[:space:]]*\[libdefaults\]/{flag=1; next} /^[[:space:]]*\[/{flag=0} flag' /etc/krb5.conf | \
+        grep -E '^[[:space:]]*default_realm[[:space:]]*=')
+    if [ -z "$default_realm" ]; then
+        return 0
+    fi
+
+    local realms_block
+    realms_block=$(awk '/^[[:space:]]*\[realms\]/{flag=1; next} /^[[:space:]]*\[/{flag=0} flag' /etc/krb5.conf)
+
+    if [ -z "$realms_block" ]; then
+        state "System: /etc/krb5.conf has default_realm set but no [realms] section. Check skipped" 2
+        return 0
+    fi
+
+    local -a entries=()
+    local line key value host
+    while IFS= read -r line; do
+        [[ "$line" =~ ^[[:space:]]*(kdc|admin_server)[[:space:]]*=[[:space:]]*(.+)$ ]] || continue
+        key="${BASH_REMATCH[1]}"
+        value="${BASH_REMATCH[2]}"
+        # strip trailing comment, then optional :port
+        host=$(echo "$value" | sed -e 's/[[:space:]]*#.*$//' -e 's/:[0-9]*[[:space:]]*$//' -e 's/[[:space:]]*$//')
+        [ -n "$host" ] && entries+=("$key:$host")
+    done <<< "$realms_block"
+
+    if [ ${#entries[@]} -eq 0 ]; then
+        if grep -Eq '^[[:space:]]*dns_lookup_kdc[[:space:]]*=[[:space:]]*true' /etc/krb5.conf; then
+            state "System: /etc/krb5.conf [realms] has no explicit kdc/admin_server entries; dns_lookup_kdc=true, relying on DNS SRV discovery. Check skipped" 2
+        else
+            state "System: /etc/krb5.conf [realms] has no explicit kdc/admin_server entries and dns_lookup_kdc is not enabled — Kerberos clients will not be able to locate a KDC" 1
+        fi
+        return 0
+    fi
+
+    local entry
+    for entry in "${entries[@]}"; do
+        key="${entry%%:*}"
+        host="${entry#*:}"
+        if [[ "$host" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || [[ "$host" == *:* ]]; then
+            state "System: krb5.conf $key '$host' is a literal IP address, skipping DNS resolution check" 0
+        elif getent hosts "$host" >/dev/null 2>&1; then
+            state "System: krb5.conf $key '$host' resolves" 0
+        else
+            state "System: krb5.conf $key '$host' does not resolve — Kerberos authentication will fail against this host" 1
+        fi
+    done
+}
+
 function check_virt() {
         local msg="System: Non BareMetal deployments should follow appropriate Reference Architecures -- Please see https://bit.ly/2CTLeWB"
         case $(systemd-detect-virt) in
@@ -1839,6 +1909,7 @@ function checks() (
     check_network
     check_firewall
     check_fapolicyd
+    check_krb5_realms
     check_java
     check_python
     check_database
