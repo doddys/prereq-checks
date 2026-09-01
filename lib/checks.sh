@@ -223,6 +223,62 @@ function check_java() {
 }
 
 function check_os() (
+    function check_rhel_version_support() {
+        # Supported RHEL minor versions for CDP Private Cloud Base 7.1.9 SP1,
+        # from the Cloudera Support Matrix (https://supportmatrix.cloudera.com/,
+        # Products -> CDP Private Cloud Base -> 7.1.9 SP1 -> Operating Systems,
+        # read 2026-09-01 as recorded in the task list; FIPS variants listed
+        # where the matrix supports them):
+        #   RHEL 7:  7.8, 7.9            (+ FIPS variants)
+        #   RHEL 8:  8.2, 8.4, 8.6, 8.9, 8.10; 8.8 only in the 8.8 FIPS
+        #            variant (plain 8.8 not listed); 8.7 not listed;
+        #            8.10 FIPS supported
+        #   RHEL 9:  9.1, 9.2, 9.5, 9.6, 9.7 (9.3 and 9.4 not listed; 9.6
+        #            FIPS not listed)
+        # TODO: the plain-8.8-unsupported-but-8.8-FIPS-supported split and the
+        # 9.2 -> 9.5 (skipping 9.3/9.4) jump are unusual; re-verify in the
+        # Support Matrix before relying on them (flagged in the PR).
+        local rhel_version
+        rhel_version=$(get_centos_rhel_version)
+        if [ -z "$rhel_version" ]; then
+            # Not CentOS/RHEL — the matrix here is RHEL-specific; other
+            # distros are validated by their own entries and not by this
+            # check.
+            return 0
+        fi
+
+        local fips=unknown
+        if command -v fips-mode-setup >/dev/null 2>&1; then
+            # RHEL 8+: canonical FIPS state check
+            if fips-mode-setup --check 2>/dev/null | grep -q "is enabled"; then
+                fips=true
+            else
+                fips=false
+            fi
+        elif [ -r /proc/cmdline ] && grep -q "fips=1" /proc/cmdline; then
+            # RHEL 7 fallback: fips-mode-setup is RHEL 8+ only
+            fips=true
+        fi
+
+        local msg="System: RHEL $rhel_version support for CDP Private Cloud Base 7.1.9 SP1"
+        case "$rhel_version" in
+            7.8|7.9|8.2|8.4|8.6|8.9|8.10|9.1|9.2|9.5|9.6|9.7)
+                state "$msg (FIPS: $fips)" 0
+                ;;
+            8.8)
+                # Plain 8.8 is not in the matrix; 8.8 FIPS is.
+                if [ "$fips" = true ]; then
+                    state "$msg in FIPS mode" 0
+                else
+                    state "$msg: 8.8 is only supported in the FIPS variant (Support Matrix, CDP 7.1.9 SP1). Actual FIPS state: $fips" 1
+                fi
+                ;;
+            *)
+                state "$msg: this RHEL minor version is not in the Support Matrix (FIPS: $fips). See https://supportmatrix.cloudera.com/" 1
+                ;;
+        esac
+    }
+
     function check_swappiness() {
         # http://www.cloudera.com/content/www/en-us/documentation/enterprise/latest/topics/cdh_admin_performance.html#xd_583c10bfdbd326ba-7dae4aa6-147c30d0933--7fd5__section_xpq_sdf_jq
         local swappiness
@@ -444,6 +500,7 @@ function check_os() (
             state "System: Entropy should be more than 500, Actual: $entropy -- Please see https://bit.ly/2IoOj0K" 2
         fi
     }
+    check_rhel_version_support
     check_swappiness
     check_overcommit_memory
     check_tuned
