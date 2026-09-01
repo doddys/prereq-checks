@@ -1704,12 +1704,45 @@ function check_network() (
     }
 
     function check_nscd_and_sssd() {
-        _check_service_is_running 'Network' 'nscd'
-        local nscd_running=${SERVICE_STATE['running']}
         _check_service_is_running 'Network' 'sssd' 2
         local sssd_running=${SERVICE_STATE['running']}
 
-        if $nscd_running && $sssd_running; then
+        # nscd's own installed/running/autostart state is informational
+        # only: whether it should be running isn't a fixed CDP
+        # requirement, it depends on whether sssd is in use. Report every
+        # branch at the same informational level directly (rather than
+        # via _check_service_is_running, which hardcodes "running" as
+        # PASS regardless of the msgflag passed in).
+        get_service_state 'nscd'
+        local nscd_installed=${SERVICE_STATE['installed']}
+        local nscd_running=${SERVICE_STATE['running']}
+        local nscd_autostart=${SERVICE_STATE['autostart']}
+        if [ "$nscd_installed" = true ]; then
+            if [ "$nscd_running" = true ]; then
+                state "Network: nscd is running" 2
+            else
+                state "Network: nscd is not running" 2
+            fi
+            if [ "$nscd_autostart" = true ]; then
+                state "Network: nscd auto-starts on boot" 2
+            else
+                state "Network: nscd does not auto-start on boot" 2
+            fi
+        else
+            state "Network: nscd is not installed" 2
+        fi
+
+        # Preferred configuration: nscd disabled when sssd is active.
+        # https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/7/html/System-Level_Authentication_Guide/usingnscd-sssd.html
+        if $sssd_running; then
+            if [ "$nscd_running" = true ]; then
+                state "Network: nscd should be disabled — sssd is active and is the preferred name service cache" 2
+            else
+                state "Network: nscd is disabled, sssd is active (preferred)" 0
+            fi
+        fi
+
+        if [ "$nscd_running" = true ] && $sssd_running; then
             # 7.8. USING NSCD WITH SSSD
             # SSSD is not designed to be used with the NSCD daemon.
             # Even though SSSD does not directly conflict with NSCD, using both services
