@@ -1859,6 +1859,41 @@ function check_sudo() {
     fi
 }
 
+function check_opt_cloudera_disk_space() {
+    # /opt/cloudera should have at least 100 GB available: "100 GB for CM"
+    # and "100 GB for all hosts" as the minimum space needed for each
+    # installed and retained CDP version. Not stated in the CDP 7.1.9
+    # Private Cloud Base install book itself; sourced from the CDP
+    # upgrade guide's disk-space/mountpoint requirements table (same
+    # /opt/cloudera requirement, different book — no 7.1.9-base-book page
+    # was found stating this number independently):
+    # https://docs-archive.cloudera.com/cdp-private-cloud-upgrade/latest/upgrade-hdp3/topics/amb3-diskspace-mountpoint.html
+    local required_gb=100
+    local check_path="/opt/cloudera"
+    # /opt/cloudera won't exist yet on a host being prereq-checked before
+    # install — fall back to whichever ancestor directory actually exists,
+    # since that's the mountpoint /opt/cloudera will land on once created.
+    if [ ! -d "$check_path" ]; then
+        check_path="/opt"
+    fi
+    if [ ! -d "$check_path" ]; then
+        check_path="/"
+    fi
+    local avail_kb
+    avail_kb=$(df -Pk "$check_path" 2>/dev/null | tail -1 | awk '{print $4}')
+    if [ -z "$avail_kb" ]; then
+        state "System: could not determine available disk space for $check_path. Check skipped" 2
+        return 0
+    fi
+    local avail_gb=$((avail_kb / 1024 / 1024))
+    local msg="System: $check_path should have at least ${required_gb}GB available (100 GB per installed/retained CDP version). Actual: ${avail_gb}GB"
+    if [ "$avail_gb" -ge "$required_gb" ]; then
+        state "$msg" 0
+    else
+        state "$msg" 2
+    fi
+}
+
 function check_krb5_realms() {
     # KDC hostname resolution. In real CDP deployments the backing KDC is
     # very often Active Directory or FreeIPA, but kdc=/admin_server=
@@ -1942,6 +1977,7 @@ function checks() (
     reset_service_state
     check_os
     check_sudo
+    check_opt_cloudera_disk_space
     check_virt
     check_network
     check_firewall
