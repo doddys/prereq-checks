@@ -174,17 +174,24 @@ function get_service_state() {
     reset_service_state
 
     if is_centos_rhel_7 || is_centos_rhel_8 || is_centos_rhel_9; then
-        local sub_state
-        sub_state=$(systemctl show "$service_name" --type=service --property=SubState 2</dev/null | sed -e 's/^.*=//')
-        case $sub_state in
-            'running')  SERVICE_STATE['installed']=true
-                        SERVICE_STATE['running']=true
-                        ;;
-            'dead')     SERVICE_STATE['installed']=true
-                        ;;
-        esac
+        # LoadState (not SubState) is what actually distinguishes "unit
+        # not installed" from "installed but stopped": systemd reports
+        # SubState=dead for BOTH a stopped-but-installed unit and a
+        # completely nonexistent one, so SubState alone can't tell them
+        # apart (verified: `systemctl show <nonexistent> --property=SubState`
+        # returns "dead", while --property=LoadState returns "not-found").
+        local unit_state load_state sub_state
+        unit_state=$(systemctl show "$service_name" --type=service --property=LoadState --property=SubState 2>/dev/null)
+        load_state=$(echo "$unit_state" | awk -F= '/^LoadState=/ { print $2 }')
+        sub_state=$(echo "$unit_state" | awk -F= '/^SubState=/ { print $2 }')
+        if [ "$load_state" = "loaded" ]; then
+            SERVICE_STATE['installed']=true
+        fi
+        if [ "$sub_state" = "running" ]; then
+            SERVICE_STATE['running']=true
+        fi
 
-        systemctl is-enabled "$service_name" --type=service --quiet 2</dev/null
+        systemctl is-enabled "$service_name" --type=service --quiet 2>/dev/null
         case $? in
             0)  SERVICE_STATE['autostart']=true
                 ;;

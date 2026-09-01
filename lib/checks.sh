@@ -905,13 +905,17 @@ function check_network() (
             state "Network: nscd is not installed" 2
         fi
 
-        # Preferred configuration: nscd disabled when sssd is active.
+        # Preferred configuration when sssd is active: nscd disabled, or
+        # not installed at all (SSSD is the preferred name service cache;
+        # nscd isn't designed to run alongside it).
         # https://access.redhat.com/documentation/en-US/Red_Hat_Enterprise_Linux/7/html/System-Level_Authentication_Guide/usingnscd-sssd.html
         if $sssd_running; then
             if [ "$nscd_running" = true ]; then
-                state "Network: nscd should be disabled — sssd is active and is the preferred name service cache" 2
+                state "Network: sssd is active — nscd should be disabled or uninstalled, not run alongside it (sssd is the preferred name service cache)" 2
+            elif [ "$nscd_installed" = true ]; then
+                state "Network: sssd is active and nscd is installed but disabled (preferred; uninstalling nscd entirely is also fine)" 0
             else
-                state "Network: nscd is disabled, sssd is active (preferred)" 0
+                state "Network: sssd is active and nscd is not installed (preferred)" 0
             fi
         fi
 
