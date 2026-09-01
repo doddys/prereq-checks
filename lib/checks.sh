@@ -226,20 +226,42 @@ function check_os() (
     }
 
     function check_tuned() {
-        # "tuned" service should be disabled on RHEL/CentOS 7.x
-        # https://www.cloudera.com/documentation/enterprise/latest/topics/cdh_admin_performance.html#xd_583c10bfdbd326ba-7dae4aa6-147c30d0933--7fd5__disable-tuned
-        if is_centos_rhel_7; then
-            systemctl status tuned &>/dev/null
-            case $? in
-                0) state "System: tuned is running" 1;;
-                3) state "System: tuned is not running" 0;;
-                *) state "System: tuned is not installed" 0;;
-            esac
-            if [ "$(systemctl is-enabled tuned 2>/dev/null)" == "enabled" ]; then
-                state "System: tuned auto-starts on boot" 1
-            else
-                state "System: tuned does not auto-start on boot" 0
-            fi
+        # "tuned" service should be disabled on RHEL/CentOS hosts: an active
+        # tuned profile can silently re-enable transparent hugepages (which
+        # must stay disabled,
+        # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-clusters/topics/cm-disabling-transparent-hugepages.html
+        # for "RHEL/CentOS 7.x, 8.x, and 9.x") after the THP settings have
+        # been applied.
+        # The disable-tuned instruction itself is documented for RHEL/CentOS
+        # 7.x only: "If your cluster hosts are running RHEL/CentOS 7.x,
+        # disable the "tuned" service" (Cloudera Enterprise "Optimizing
+        # Performance in CDH",
+        # https://docs.cloudera.com/documentation/enterprise/latest/topics/cdh_admin_performance.html
+        # — page no longer online; archived copy via web.archive.org,
+        # snapshot 2024-03-02). The CDP 7.1.9 documentation book has no
+        # tuned guidance at all, so on RHEL 8/9 a running tuned daemon is a
+        # warning (THP re-enable risk) rather than a hard failure.
+        local rhel_major
+        rhel_major=$(get_centos_rhel_major_version)
+        # tuned check is systemd-based and Cloudera-documented for RHEL 7+;
+        # silently skip anything else (mirrors the old RHEL7-only gate).
+        if [ -z "$rhel_major" ] || [ "$rhel_major" -lt 7 ]; then
+            return 0
+        fi
+        local fail_flag=1
+        if [ "$rhel_major" -ge 8 ]; then
+            fail_flag=2
+        fi
+        systemctl status tuned &>/dev/null
+        case $? in
+            0) state "System: tuned is running" $fail_flag;;
+            3) state "System: tuned is not running" 0;;
+            *) state "System: tuned is not installed" 0;;
+        esac
+        if [ "$(systemctl is-enabled tuned 2>/dev/null)" == "enabled" ]; then
+            state "System: tuned auto-starts on boot" $fail_flag
+        else
+            state "System: tuned does not auto-start on boot" 0
         fi
     }
 
@@ -303,31 +325,53 @@ function check_os() (
         esac
     }
 
-    # Check that the system clock is synced by either ntpd or chronyd. Chronyd
-    # is on CentOS/RHEL 7 and above only.
-    # https://community.cloudera.com/t5/Cloudera-Manager-Installation/Should-Cloudera-NTP-use-Chrony-or-NTPD/td-p/55986
+    # Check that the system clock is synced by either ntpd or chronyd.
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-enable-NTP-service.html
+    # "Runtime requires that you configure a Network Time Protocol (NTP)
+    # service on each machine in your cluster." — the doc accepts either
+    # daemon ("Most operating systems include the ntpd service", "Some
+    # operating systems use chronyd by default") and warns that running both
+    # at once makes Cloudera Manager report clock offset errors even when
+    # time is correct.
+    # The old "kudu supports only ntpd" warning is obsolete: upstream Kudu
+    # requirements list "ntp or chrony"
+    # (https://kudu.apache.org/docs/installation.html, "Operating System
+    # Requirements"), and chronyd is the default NTP daemon on RHEL 8/9.
     function check_time_sync() (
         function is_ntp_in_sync() {
-            if [ "$(ntpstat | grep -c "synchronised to NTP server")" -eq 1 ]; then
+            if [ "$(ntpstat 2>/dev/null | grep -c "synchronised to NTP server")" -eq 1 ]; then
                 state "System: ntpd clock synced" 0
             else
                 state "System: ntpd clock NOT synced. Check 'ntpstat'" 1
             fi
         }
 
-        if is_centos_rhel_7; then
+        function is_chrony_in_sync() {
+            if chronyc tracking 2>/dev/null | grep -q "Leap status     : Normal"; then
+                state "System: chronyd clock synced" 0
+            else
+                state "System: chronyd clock NOT synced. Check 'chronyc tracking'" 1
+            fi
+        }
+
+        if [ -n "$(get_centos_rhel_major_version)" ]; then
+            # ntpd and chronyd are both acceptable on RHEL/CentOS 7/8/9, but
+            # only one of them should run at a time.
             get_service_state 'ntpd'
-            if [ "${SERVICE_STATE['running']}" = true ]; then
-                # If ntpd is running, then chrony shouldn't be
+            local ntpd_running=${SERVICE_STATE['running']}
+            get_service_state 'chronyd'
+            local chronyd_running=${SERVICE_STATE['running']}
+
+            if $ntpd_running && $chronyd_running; then
+                state "System: Both ntpd and chronyd are running. Only one NTP daemon should run; running both makes Cloudera Manager report clock offset errors. Disable one of them." 1
+            elif $ntpd_running; then
                 _check_service_is_running 'System' 'ntpd'
                 is_ntp_in_sync
-                _check_service_is_not_running 'System' 'chronyd'
-            else
+            elif $chronyd_running; then
                 _check_service_is_running 'System' 'chronyd'
-                get_service_state 'chronyd'
-                if [ "${SERVICE_STATE['running']}" = true ]; then
-                    state "System: kudu supports only ntpd. If kudu is not used, this warning can be ignored." 2
-                fi
+                is_chrony_in_sync
+            else
+                state "System: Neither ntpd nor chronyd is running. An NTP service must run on every cluster host." 1
             fi
         else
             _check_service_is_running 'System' 'ntpd'
@@ -601,8 +645,17 @@ function check_network() (
 )
 
 function check_firewall() {
-    # http://www.cloudera.com/content/www/en-us/documentation/enterprise/latest/topics/install_cdh_disable_iptables.html
-    if is_centos_rhel_7; then
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-disabling-firewall.html
+    # "To disable the firewall on each host in your cluster, perform the
+    # following steps on each host." The RHEL-labelled step is
+    # "sudo systemctl disable firewalld" / "sudo systemctl stop firewalld"
+    # (labeled "RHEL 7 compatible" in the doc). The doc has no RHEL8/9-specific
+    # variant, but firewalld is the default firewall service on RHEL 8 and 9
+    # as well (the iptables service is not shipped as a systemd unit by
+    # default on RHEL 8/9), so the same firewalld check applies to 7/8/9.
+    # Non-RHEL/CentOS systems (older CentOS 6 etc.) keep the legacy iptables
+    # check.
+    if [ -n "$(get_centos_rhel_major_version)" ]; then
         _check_service_is_not_running 'Network' 'firewalld'
     else
         _check_service_is_not_running 'Network' 'iptables'
