@@ -741,6 +741,22 @@ function check_firewall() {
     fi
 }
 
+function check_fapolicyd() {
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-before-you-install.html
+    # Caution note (verbatim): "Cloudera requires disabling the fapolicyd
+    # daemon present in RHEL 8 (and later) systems before beginning
+    # installation" of the Cloudera Manager application. "Improper
+    # configuration may render the system non-functional."
+    # fapolicyd does not exist on RHEL 7 and earlier, so this check is
+    # RHEL 8+ only.
+    local rhel_major
+    rhel_major=$(get_centos_rhel_major_version)
+    if [ -z "$rhel_major" ] || [ "$rhel_major" -lt 8 ]; then
+        return 0
+    fi
+    _check_service_is_not_running 'System' 'fapolicyd'
+}
+
 function check_virt() {
         local msg="System: Non BareMetal deployments should follow appropriate Reference Architecures -- Please see https://bit.ly/2CTLeWB"
         case $(systemd-detect-virt) in
@@ -756,6 +772,7 @@ function checks() (
     check_virt
     check_network
     check_firewall
+    check_fapolicyd
     check_java
     check_database
     check_jdbc_connector
