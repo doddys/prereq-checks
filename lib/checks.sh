@@ -291,6 +291,27 @@ function check_os() (
         fi
     }
 
+    function check_swappiness_persist() {
+        # Same source as check_swappiness. The runtime /proc value above
+        # does not survive a reboot unless persisted via sysctl (same
+        # silent-revert risk that check_thp_grub already guards against for
+        # THP) — check for a persisted vm.swappiness=1 in /etc/sysctl.conf
+        # or /etc/sysctl.d/*.conf.
+        local msg="System: vm.swappiness=1 should be persisted in /etc/sysctl.conf or /etc/sysctl.d/*.conf"
+        local -a sysctl_files=()
+        [ -f /etc/sysctl.conf ] && sysctl_files+=(/etc/sysctl.conf)
+        local f
+        for f in /etc/sysctl.d/*.conf; do
+            [ -f "$f" ] && sysctl_files+=("$f")
+        done
+        if [ ${#sysctl_files[@]} -gt 0 ] && \
+           grep -Eq '^[[:space:]]*vm\.swappiness[[:space:]]*=[[:space:]]*1[[:space:]]*$' "${sysctl_files[@]}"; then
+            state "$msg" 0
+        else
+            state "$msg. Not found — setting will silently revert on reboot" 1
+        fi
+    }
+
     function check_overcommit_memory() {
         # https://www.cloudera.com/documentation/enterprise/5-15-x/topics/impala_scalability.html#kerberos_overhead_memory_usage
         local overcommit_memory
@@ -300,6 +321,24 @@ function check_os() (
             state "$msg" 0
         else
             state "$msg. Actual: $overcommit_memory" 1
+        fi
+    }
+
+    function check_overcommit_memory_persist() {
+        # Same source as check_overcommit_memory; same persistence risk as
+        # check_swappiness_persist above.
+        local msg="System: vm.overcommit_memory=1 should be persisted in /etc/sysctl.conf or /etc/sysctl.d/*.conf"
+        local -a sysctl_files=()
+        [ -f /etc/sysctl.conf ] && sysctl_files+=(/etc/sysctl.conf)
+        local f
+        for f in /etc/sysctl.d/*.conf; do
+            [ -f "$f" ] && sysctl_files+=("$f")
+        done
+        if [ ${#sysctl_files[@]} -gt 0 ] && \
+           grep -Eq '^[[:space:]]*vm\.overcommit_memory[[:space:]]*=[[:space:]]*1[[:space:]]*$' "${sysctl_files[@]}"; then
+            state "$msg" 0
+        else
+            state "$msg. Not found — setting will silently revert on reboot" 1
         fi
     }
 
@@ -502,7 +541,9 @@ function check_os() (
     }
     check_rhel_version_support
     check_swappiness
+    check_swappiness_persist
     check_overcommit_memory
+    check_overcommit_memory_persist
     check_tuned
     check_thp_defrag
     check_thp_enabled
@@ -938,6 +979,22 @@ function check_fapolicyd() {
     _check_service_is_not_running 'System' 'fapolicyd'
 }
 
+function check_sudo() {
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-installation-wizard.html
+    # "Enter the root name or username for the root account that has
+    # password-less sudo privileges." Sudoers entry format given there:
+    # "%<username> ALL=(ALL) NOPASSWD: ALL". CM Server needs this (or the
+    # root account) to log into each host over SSH during install.
+    local msg="System: current user must be root or have password-less sudo (required for CM Server host login)"
+    if [ "$(id -u)" -eq 0 ]; then
+        state "$msg. Running as root" 0
+    elif sudo -n true 2>/dev/null; then
+        state "$msg. Password-less sudo confirmed" 0
+    else
+        state "$msg. sudo requires a password or is not permitted for this user" 1
+    fi
+}
+
 function check_virt() {
         local msg="System: Non BareMetal deployments should follow appropriate Reference Architecures -- Please see https://bit.ly/2CTLeWB"
         case $(systemd-detect-virt) in
@@ -950,6 +1007,7 @@ function checks() (
     print_header "Prerequisite checks"
     reset_service_state
     check_os
+    check_sudo
     check_virt
     check_network
     check_firewall
