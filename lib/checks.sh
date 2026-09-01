@@ -1067,6 +1067,82 @@ function check_opt_cloudera_disk_space() {
     fi
 }
 
+function check_data_disk_mounts() {
+    # HDFS/DataNode data-disk filesystem & mount guidance, Cloudera
+    # Reference Architecture "Filesystems":
+    # https://docs.cloudera.com/cdp-reference-architectures/latest/cdp-pvc-base-ra/topics/ra-cdpdc-filesystems.html
+    # - "Cloudera recommends using an extent-based filesystem. This
+    #   includes ext3, ext4, and xfs."
+    # - ext4: reduce the superuser block reservation from the 5% default
+    #   to 1% ("-m1" at mkfs time).
+    # - "Drives should be mounted in the /etc/fstab filesystem table
+    #   using the noatime option."
+    #
+    # This guidance is sourced from HDFS/DataNode docs specifically, but
+    # is applied here to every additional local data-disk mount found on
+    # the host, not just ones named /data* (that was the old
+    # print_disks()/data_mounts() behaviour, informational-only and
+    # pattern-matched on the mountpoint containing "/data" — real
+    # deployments name data disks many ways: /data1..N, /kafka1..N,
+    # /nifi-content, /grid/0..N, etc., so name-matching silently misses
+    # most of them). At prereq-check time it isn't yet known which mount
+    # will end up assigned to HDFS vs YARN vs another workload anyway —
+    # and YARN nodemanager local dirs are typically colocated on the same
+    # physical disks as HDFS DataNode dirs — so this checks every
+    # non-system data disk uniformly. Kafka has its own separate Cloudera
+    # filesystem-type guidance (ext4/xfs) that happens to agree with the
+    # above, but no confirmed Cloudera source for the specific 1%
+    # reserved-blocks number on a Kafka disk, so that number is labelled
+    # as an HDFS/DataNode recommendation in the message text rather than
+    # asserted as a universal requirement.
+    #
+    # A "data disk" here means any real block-device-backed mount
+    # (findmnt source starting with /dev/) that is a directory and isn't
+    # one of this host's standard OS partitions.
+    local -a system_mounts=(/ /boot /boot/efi /home /opt /opt/cloudera /tmp /usr /usr/hdp /var /var/lib /var/log)
+
+    local line source target fstype options is_system m
+    while IFS= read -r line; do
+        read -r source target fstype options <<< "$line"
+        [ -z "$target" ] && continue
+        [ -d "$target" ] || continue
+
+        is_system=false
+        for m in "${system_mounts[@]}"; do
+            [ "$target" = "$m" ] && is_system=true && break
+        done
+        $is_system && continue
+
+        local msg_prefix="System: data disk $target ($source, $fstype)"
+
+        case "$fstype" in
+            ext3|ext4|xfs)
+                state "$msg_prefix uses a Cloudera-recommended extent-based filesystem" 0
+                ;;
+            *)
+                state "$msg_prefix: $fstype is not a Cloudera-recommended data disk filesystem (ext3/ext4/xfs)" 2
+                ;;
+        esac
+
+        if echo "$options" | tr ',' '\n' | grep -qx 'noatime'; then
+            state "$msg_prefix mounted with noatime" 0
+        else
+            state "$msg_prefix not mounted with noatime (Cloudera recommendation)" 2
+        fi
+
+        if [ "$fstype" = "ext4" ]; then
+            local resv_pct
+            resv_pct=$(tune2fs -l "$source" 2>/dev/null | \
+                awk '/^Reserved block count:/ {r=$4} /^Block count:/ {b=$3} END {if (b>0) printf "%.0f", (r/b)*100}')
+            if [ -n "$resv_pct" ] && [ "$resv_pct" -le 1 ]; then
+                state "$msg_prefix ext4 reserved blocks are ${resv_pct}% (<=1%, HDFS/DataNode recommendation)" 0
+            else
+                state "$msg_prefix ext4 reserved blocks should be reduced to 1% via 'mkfs -m1' (HDFS/DataNode recommendation). Actual: ${resv_pct:-unknown}%" 2
+            fi
+        fi
+    done < <(findmnt -lno source,target,fstype,options | grep '^/dev')
+}
+
 function check_krb5_realms() {
     # KDC hostname resolution. In real CDP deployments the backing KDC is
     # very often Active Directory or FreeIPA, but kdc=/admin_server=
@@ -1151,6 +1227,7 @@ function checks() (
     check_os
     check_sudo
     check_opt_cloudera_disk_space
+    check_data_disk_mounts
     check_virt
     check_network
     check_firewall
