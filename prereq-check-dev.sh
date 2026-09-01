@@ -30,7 +30,7 @@
 # http://redsymbol.net/articles/unofficial-bash-strict-mode/
 set -u
 
-VER=1.5.4
+VER=2.0.1
 
 if [ "$(uname)" = 'Darwin' ]; then
     echo -e "\nThis tool runs on Linux only, not Mac OS."

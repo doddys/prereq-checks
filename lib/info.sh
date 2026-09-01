@@ -12,6 +12,16 @@ function print_fqdn() {
     print_label "FQDN" "$(hostname -f)"
 }
 
+function print_ip_address() {
+    local ips
+    ips=$(hostname -I 2>/dev/null | sed -e 's/^ *//' -e 's/ *$//')
+    if [ -n "$ips" ]; then
+        print_label "IP Address" "$ips"
+    else
+        print_label "IP Address" "(unable to determine)"
+    fi
+}
+
 function print_os() {
     local distro="Unknown"
     if [ -f /etc/redhat-release ]; then
@@ -235,6 +245,7 @@ function print_internet() {
 function system_info() {
     print_header "System information"
     print_fqdn
+    print_ip_address
     print_os
     print_cpu_and_ram
     print_swap
