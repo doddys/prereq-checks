@@ -30,7 +30,7 @@
 # http://redsymbol.net/articles/unofficial-bash-strict-mode/
 set -u
 
-VER=1.5
+VER=1.5.4
 
 if [ "$(uname)" = 'Darwin' ]; then
     echo -e "\nThis tool runs on Linux only, not Mac OS."
@@ -588,48 +588,104 @@ function check_addc() {
 }
 
 function check_privs() {
-    print_header "Prerequisite checks: Direct to AD integration:"
-    ldapsearch -x -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" -b "${ARG_SEARCHBASE}"  -L -w "${ARG_USERPSWD}" > /dev/zero 2>/dev/zero
+    print_header "AD privilege checks"
+    
+    ### disable cert verification if using ldaps
+    export LDAPTLS_REQCERT=never
+    
+    STDERR=$(ldapsearch -x -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" -b "${ARG_SEARCHBASE}"  -L -w "${ARG_USERPSWD}" 2>&1 >/dev/zero)
     SRCH_RESULT=$?
+
     if [ $SRCH_RESULT -eq 0 ]; then
-        state "User exists" 0
-        cat > /tmp/prereq-check.ldif <<EOFILE
-dn: CN=Cloudera User,${ARG_SEARCHBASE}
+        state "KDC Account Manager user exists" 0
+
+	RANDOM_CN=prereqchk01
+
+	ldapmodify -x -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" -w "${ARG_USERPSWD}" > /dev/zero 2> /dev/zero <<-%EOF
+dn: CN=${RANDOM_CN},${ARG_SEARCHBASE}
+changetype: add
 objectClass: top
 objectClass: person
 objectClass: organizationalPerson
 objectClass: user
-EOFILE
-        # NOTE: Heredoc requires the above spacing/format or it won't work.
+sAMAccountName: ${RANDOM_CN}
+%EOF
 
-        ldapadd -x -H "${ARG_LDAPURI}" -a -D "${ARG_BINDDN}" -f /tmp/prereq-check.ldif -w "${ARG_USERPSWD}" > /dev/zero 2>/dev/zero
         ADD_RESULT=$?
         if [ $ADD_RESULT -eq 0 ]; then
-            state "Has delegated privileges to add a new user on the OU" 0
-            ldapdelete -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" "CN=Cloudera User,${ARG_SEARCHBASE}" -w "${ARG_USERPSWD}"
+            state "Create a new user principal in the OU" 0
+            ldapdelete -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" "CN=${RANDOM_CN},${ARG_SEARCHBASE}" -w "${ARG_USERPSWD}" > /dev/zero 2>/dev/zero
             DEL_RESULT=$?
             if [ $DEL_RESULT -eq 0 ]; then
-                state "Has delegated privileges to delete a user on the OU" 0
-                state "Sufficient privileges available to perform a direct to AD integration" 0
+                state "Delete a user principal in the OU" 0
+
+                # continue on to perform Active Directory SPN uniqueness check impact
+                check_spn_uniqueness
+
+	    else
+		state "Delete a user principal in the OU" 1
             fi
         elif [ $ADD_RESULT -eq 50 ]; then
-            state "ldap_add: Insufficient access (50)" 1
+            state "Create a new user principal in the OU (reason: Insufficient access)" 1
         elif [ $ADD_RESULT -eq 68 ]; then
-            state "ldap_add: Already exists (68)" 1
+            state "Create a new user principal in the OU (reason: Already exists)" 1
         else
-            state "Not able to add user" 1
+            state "Unexpected error creating a new user principal in the OU. LDAP error code = ${ADD_RESULT}" 1
         fi
+    elif [ $SRCH_RESULT -eq 32 ]; then
+        state "Unable to find OU" 1
     elif [ $SRCH_RESULT -eq 49 ]; then
-        state "Invalid credentials - ldap_bind(49)" 1
-    elif [ $SRCH_RESULT -eq 10 ]; then
-        state "Possible invalid BaseDN - ldap_bind(10)" 1
+        state "Invalid KDC Account Manager credentials" 1
     elif [ $SRCH_RESULT -eq 255 ]; then
         state "Not able to find the LDAP server specified" 1
     elif [ $SRCH_RESULT -eq 34 ]; then
-        state "Invalid DN syntax (34)" 1
+        state "Invalid OU DN" 1
     else
-        state -e "Unrecognized error occured. Not able to connect to AD using\n\tLDAPURI: ${ARG_LDAPURI}\n\tBINDDN: ${ARG_BINDDN}\n\tSEARCHBASE: ${ARG_SEARCHBASE}\n\tand provided password" 1
+        state "Unexpected error contacting domain controller. LDAP error code = $SRCH_RESULT, LDAP error message: ${STDERR}" 1
     fi
+}
+
+
+########################################################################################################
+#### SPN uniqueness check - test if Cloudera will be affected by MS patch (KB5008382) for CVE-2021-42282
+########################################################################################################
+
+function check_spn_uniqueness() {
+
+    HOSTNAME=$(hostname -f)
+    RANDOM_CN=prereqchk03
+
+    SEARCHBASE=$(echo ${ARG_SEARCHBASE} | grep -io 'dc=.*')
+
+    ldapsearch -x -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" -w "${ARG_USERPSWD}" -b "${SEARCHBASE}" "servicePrincipalName=HTTP/${HOSTNAME}" | grep "^cn:" 2>&1 > /dev/null
+    SRCH_RESULT=$?
+    if [[ $SRCH_RESULT -eq 0 ]]; then
+      state "Error performing SPN alias uniqueness check. HTTP SPN already exists." 1
+      return
+    fi
+
+    ldapmodify -x -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" -w "${ARG_USERPSWD}" > /dev/zero 2>/dev/zero <<-%EOF
+dn: CN=${RANDOM_CN},${ARG_SEARCHBASE}
+changetype: add
+objectClass: top
+objectClass: person
+objectClass: organizationalPerson
+objectClass: user
+sAMAccountName: ${RANDOM_CN}
+servicePrincipalName: HTTP/${HOSTNAME}
+%EOF
+
+    ADD_RESULT=$?
+    if [ $ADD_RESULT -eq 0 ]; then
+      # creation of HTTP SPN succeeded
+      state "SPN alias uniqueness check impact (MS KB5008382 patch for CVE-2021-42282)" 0
+    elif [ $ADD_RESULT -eq 19 ]; then
+      state "SPN alias uniqueness check impact (MS KB5008382 patch for CVE-2021-42282)" 1
+    else
+      state "Unexpected error performing SPN alias uniqueness check. LDAP error code = $ADD_RESULT" 1
+    fi
+
+    ldapdelete -H "${ARG_LDAPURI}" -D "${ARG_BINDDN}" "CN=${RANDOM_CN},${ARG_SEARCHBASE}" -w "${ARG_USERPSWD}" > /dev/zero 2>/dev/zero
 }
 
 # cdsw-checks.sh ------------------------------------------------
@@ -782,6 +838,34 @@ function check_jce() {
 function check_java() {
     # The following candidate list is from CM agent:
     # Starship/cmf/agents/cmf/service/common/cloudera-config.sh
+    local JAVA17_HOME_CANDIDATES=(
+      '/usr/java/jdk1.17'
+      '/usr/lib/jvm/jdk-17'
+      '/usr/lib/jvm/java-17-oracle'
+    )
+    local OPENJAVA17_HOME_CANDIDATES=(
+      '/usr/lib/jvm/java-17'
+      '/usr/lib/jvm/jdk-17'
+      '/usr/lib/jvm/jdk1.17'
+      '/usr/lib/jvm/zulu-17'
+      '/usr/lib/jvm/zulu17'
+      '/usr/lib64/jvm/java-17'
+      '/usr/lib64/jvm/jdk1.17'
+    )
+    local JAVA11_HOME_CANDIDATES=(
+      '/usr/java/jdk-11'
+      '/usr/lib/jvm/jdk-11'
+      '/usr/lib/jvm/java-11-oracle'
+    )
+    local OPENJAVA11_HOME_CANDIDATES=(
+      '/usr/lib/jvm/java-11'
+      '/usr/java/jdk-11'
+      '/usr/lib/jvm/jdk-11'
+      '/usr/lib64/jvm/jdk-11'
+      '/usr/lib/jvm/zulu-11'
+      '/usr/lib/jvm/zulu11'
+      '/usr/lib/jvm/java-11-zulu-openjdk'
+    )
     local JAVA6_HOME_CANDIDATES=(
         '/usr/lib/j2sdk1.6-sun'
         '/usr/lib/jvm/java-6-sun'
@@ -807,99 +891,133 @@ function check_java() {
         '/usr/lib/jvm/java-7-openjdk'
     )
     local JAVA8_HOME_CANDIDATES=(
-        '/usr/java/jdk1.8'
-        '/usr/java/jre1.8'
-        '/usr/lib/jvm/j2sdk1.8-oracle'
-        '/usr/lib/jvm/j2sdk1.8-oracle/jre'
-        '/usr/lib/jvm/java-8-oracle'
+      '/usr/java/jdk1.8'
+      '/usr/java/jdk8'
+      '/usr/java/jre1.8'
+      '/usr/lib/jvm/j2sdk1.8-oracle'
+      '/usr/lib/jvm/j2sdk1.8-oracle/jre'
+      '/usr/lib/jvm/java-8-oracle'
     )
     local OPENJAVA8_HOME_CANDIDATES=(
-        '/usr/lib/jvm/java-1.8.0-openjdk'
-        '/usr/lib/jvm/java-8-openjdk'
+      '/usr/lib/jvm/java-1.8.0-openjdk'
+      '/usr/lib/jvm/java-8'
+      '/usr/lib64/jvm/java-1.8.0-openjdk'
+      '/usr/lib64/jvm/java-8-openjdk'
+      '/usr/lib/jvm/zulu-8'
+      '/usr/lib/jvm/zulu8'
+      '/usr/lib/jvm/java-8-zulu-openjdk'
     )
     local MISCJAVA_HOME_CANDIDATES=(
-        '/Library/Java/Home'
-        '/usr/java/default'
-        '/usr/lib/jvm/default-java'
-        '/usr/lib/jvm/java-openjdk'
-        '/usr/lib/jvm/jre-openjdk'
+      '/Library/Java/Home'
+      '/usr/java/default'
+      '/usr/lib/jvm/default-java'
+      '/usr/lib/jvm/java-openjdk'
+      '/usr/lib/jvm/jre-openjdk'
     )
     local JAVA_HOME_CANDIDATES=(
+        "${JAVA17_HOME_CANDIDATES[@]}"
+        "${JAVA11_HOME_CANDIDATES[@]}"
         "${JAVA7_HOME_CANDIDATES[@]}"
         "${JAVA8_HOME_CANDIDATES[@]}"
         "${JAVA6_HOME_CANDIDATES[@]}"
         "${MISCJAVA_HOME_CANDIDATES[@]}"
+        "${OPENJAVA17_HOME_CANDIDATES[@]}"
+        "${OPENJAVA11_HOME_CANDIDATES[@]}"
         "${OPENJAVA7_HOME_CANDIDATES[@]}"
         "${OPENJAVA8_HOME_CANDIDATES[@]}"
         "${OPENJAVA6_HOME_CANDIDATES[@]}"
     )
 
-    # Find and verify Java
-    # https://www.cloudera.com/documentation/enterprise/release-notes/topics/rn_consolidated_pcm.html#pcm_jdk
-    # JDK 7 minimum required version is JDK 1.7u55
-    # JDK 8 minimum required version is JDK 1.8u31
-    # excludes JDK 1.8u40, JDK 1.8u45, and JDK 1.8u60
-    # OpenJDK minimum required version is 1.8u181
+    function get_jdk_type() {
+       java=$1
+       JDK_TYPE=$($java -version 2>&1 | head -2 | tail -1 | awk '{print $1}') 
+  
+       case $JDK_TYPE in
+           Java\(TM\) )
+               echo "Oracle";;
+           OpenJDK )
+               if [[ -z $($java -version 2>&1 | head -2 | tail -1 |grep Zulu) ]]; then
+                   echo "OpenJDK"
+               else
+                   echo "Azul"
+               fi
+               ;;
+           * )
+               echo "Unknown";;
+        esac
+    }
+
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-java-requirements.html
+    # JDK 8 minimum required version is 1.8u181
+    # OpenJDK 8 minimum required version is 1.8u232
+    # Azul JDK 8 minimum required version is 8.56.0.21
     java_found=false
     for candidate_regex in "${JAVA_HOME_CANDIDATES[@]}"; do
         # shellcheck disable=SC2045,SC2086
         for candidate in $(ls -rvd ${candidate_regex}* 2>/dev/null); do
             if [ -x "$candidate/bin/java" ]; then
                 java_found=true
-                JDK_VERSION=$($candidate/bin/java -version 2>&1 | head -1 | awk '{print $NF}' | tr -d '"')
-                JDK_VERSION_REGEX='1\.([0-9])\.0_([0-9][0-9]*)'
-                JDK_TYPE=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $1}')
-                if [[ $JDK_TYPE = "Java(TM)" ]]; then
-                    if [[ $JDK_VERSION =~ $JDK_VERSION_REGEX ]]; then
-                        if [[ ${BASH_REMATCH[1]} -eq 7 ]]; then
-                            if [[ ${BASH_REMATCH[2]} -lt 55 ]]; then
-                                state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
+                JDK_VERSION=$($candidate/bin/java -version 2>&1 | head -1 | awk '{print $3}' | tr -d '"')
+                JDK_VERSION_REGEX='(1|11)\.([0-9])\.([0-9_]*)'
+                JDK_8_MINOR_VERSION_REGEX='1\.8\.0_([0-9]*)'
+                JDK_TYPE=$(get_jdk_type "$candidate/bin/java")
+                support=true
+
+                if [[ $JDK_VERSION =~ $JDK_VERSION_REGEX ]]; then
+                    if [[ ${BASH_REMATCH[1]} -eq 1 ]]; then
+                        if [[ ${BASH_REMATCH[2]} -eq 8 ]]; then
+                            if [[ $JDK_TYPE == "Azul" ]]; then
+                                # Azul JDK 1.8.0_XXX
+                                # Azul JDK uses a different build versioning convention
+                                AZUL_BUILD=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $5}' | cut -d'-' -f1)
+                                AZUL_BUILD_REGEX='8\.([0-9]*)\.([0-9]*)\.([0-9]*)'
+                                if [[ $AZUL_BUILD =~ $AZUL_BUILD_REGEX ]]; then
+                                    # Check if Azul build is lower than 8.56.0.21 which is the minimum required version
+                                    if [[ ${BASH_REMATCH[1]} -lt 56 ]]; then
+                                        support=false
+                                    elif [[ ${BASH_REMATCH[1]} -eq 56 ]] && [[ ${BASH_REMATCH[3]} -lt 21 ]]; then
+                                        support=false
+                                    else
+                                        support=true
+                                    fi
+                                else
+                                    support=false
+                                fi
                             else
-                                state "Java: Supported Oracle Java: ${candidate}/bin/java" 0
-                                check_jce ${candidate}
-                            fi
-                        elif [[ ${BASH_REMATCH[1]} -eq 8 ]]; then
-                            if [[ ${BASH_REMATCH[2]} -lt 31 ]]; then
-                                state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
-                            elif [[ ${BASH_REMATCH[2]} -eq 40 ]]; then
-                                state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
-                            elif [[ ${BASH_REMATCH[2]} -eq 45 ]]; then
-                                state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
-                            elif [[ ${BASH_REMATCH[2]} -eq 60 ]]; then
-                                state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
-                            elif [[ ${BASH_REMATCH[2]} -eq 75 ]]; then
-                                state "Java: Oozie will not work on this Java (OOZIE-2533): ${candidate}/bin/java" 2
-                            else
-                                state "Java: Supported Oracle Java: ${candidate}/bin/java" 0
-                                check_jce ${candidate}
+                                # Oracle or OpenJDK 1.8.0_XXX
+                                if [[ $JDK_VERSION =~ $JDK_8_MINOR_VERSION_REGEX ]]; then
+                                    if [[ $JDK_TYPE == "Oracle" ]] && [[ ${BASH_REMATCH[1]} -lt 181 ]]; then
+                                        support=false
+                                    elif [[ $JDK_TYPE == "OpenJDK" ]] && [[ ${BASH_REMATCH[1]} -lt 232 ]]; then
+                                        support=false
+                                    else
+                                        support=true
+                                    fi
+                                else
+                                    support=false
+                                fi
                             fi
                         else
-                            state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
+                             support=false
+                        fi
+                    elif [[ ${BASH_REMATCH[1]} -eq 11 ]]; then
+                        # Oracle, OpenJDK and Azul Java 11 are all supported
+                        if [[ $JDK_TYPE != "Unknown" ]]; then
+                            support=true
+                        else
+                            support=false
                         fi
                     else
-                        state "Java: Unsupported Oracle Java: ${candidate}/bin/java" 1
+                        support=false
                     fi
-                elif [[ $JDK_TYPE = "OpenJDK" ]]; then
-                    if [[ $JDK_VERSION =~ $JDK_VERSION_REGEX ]]; then
-                        if [[ ${BASH_REMATCH[1]} -eq 7 ]]; then
-                            state "Java: Unsupported OpenJDK: ${candidate}/bin/java" 1
-                        elif [[ ${BASH_REMATCH[1]} -eq 8 ]]; then
-                            if [[ ${BASH_REMATCH[2]} -lt 181 ]]; then
-                                state "Java: Unsupported OpenJDK: ${candidate}/bin/java" 1
-                            elif [[ ${BASH_REMATCH[2]} -eq 242 ]]; then
-                                # https://bugs.openjdk.java.net/browse/JDK-8215032
-                                state "Java: Servers with Kerberos enabled stop functioning when using OpenJDK 1.8u242" 2
-                            else
-                                state "Java: Supported OpenJDK (CDH 5.16.1+ or 6.1.0+ only): ${candidate}/bin/java" 0
-                            fi
-                        else
-                            state "Java: Unsupported OpenJDK: ${candidate}/bin/java" 1
-                        fi
+
+                    if [[ $support == true ]]; then
+                        state "Java: Supported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 0
                     else
-                        state "Java: Unsupported OpenJDK: ${candidate}/bin/java" 1
+                        state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
                     fi
                 else
-                    state "Java: Unsupported Unknown: ${candidate}/bin/java" 1
+                    state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
                 fi
             fi
         done
@@ -1047,7 +1165,7 @@ function check_os() (
         local packages_32bit
         packages_32bit=$(rpm -qa --queryformat '\t%{NAME} %{ARCH}\n' | grep 'i[6543]86' | cut -d' ' -f1)
         if [ "$packages_32bit" ]; then
-            state "System: Found the following 32bit packages installed:\n$packages_32bit" 1
+            state "System: Found the following 32bit packages installed:\n$packages_32bit" 2
         else
             state "System: Only 64bit packages should be installed" 0
         fi
@@ -1373,6 +1491,16 @@ function print_cpu_and_ram() {
     print_label "RAM" "$(awk '/^MemTotal:/ { printf "%.2f", $2/1024/1024 ; exit}' /proc/meminfo)G"
 }
 
+function print_swap() {
+   local swap
+   swap=$(free -h | awk '/^Swap:/{print $2}')
+   if [ -z "$swap" ]
+   then
+      swap="(None)"
+   fi
+   print_label "Swap" "$swap"
+}
+
 function print_disks() (
     function data_mounts() {
         while read -r source target fstype options; do
@@ -1451,14 +1579,27 @@ function print_free_space() (
         # $ df -Ph /opt
         # Filesystem      Size  Used Avail Use% Mounted on
         # /dev/sda1        99G  1.8G   92G   2% /
+        test -d "$1" || return 0
         local path="$1"
+        local data
         local free
-        free=$(df -Ph "$path" | tail -1 | awk '{print $4}')
+        local total
+        data=$(df -Ph "$path" | tail -1)
+        free=$(echo "$data" | awk '{print $4}')
+        total=$(echo "$data" | awk '{print $2}')
         pad
-        printf "%-9s %s\n" "$path" "$free"
+        printf "%-9s %s\n" "$path" "$free of $total"
     }
     echo "Free space:"
+    free_space /
+    free_space /home
     free_space /opt
+    free_space /opt/cloudera
+    free_space /tmp
+    free_space /usr
+    free_space /usr/hdp
+    free_space /var
+    free_space /var/lib
     free_space /var/log
 )
 
@@ -1481,8 +1622,29 @@ function print_cloudera_rpms() {
 }
 
 function print_network() {
+    echo "Networks Cards:"
+    local iface
+    local iface_name
+    local iface_status
+    local iface_speed
+    local iface_duplex
+    local iface_path="/sys/class/net"
+    for iface in $iface_path/*
+    do
+        if [ -d $iface ]
+        then
+            if cat "$iface/speed" >/dev/null 2>&1
+            then
+                iface_name=$(echo "$iface" | sed 's/^.*\/\(.*\)$/\1/')
+                iface_status=$(cat $iface/operstate)
+                iface_speed=$(cat $iface/speed)
+                iface_duplex=$(cat $iface/duplex)
+                pad; echo "$iface_name ($iface_status $iface_speed $iface_duplex)"
+            fi
+        fi
+    done
     print_label "nsswitch" "$(grep "^hosts:" /etc/nsswitch.conf | sed 's/^hosts: *//')"
-    print_label "DNS server" "$(grep "^nameserver" /etc/resolv.conf | cut -d' ' -f2)"
+    print_label "DNS server" "$(awk '/^nameserver/{printf $2 " "}' /etc/resolv.conf)"
 }
 
 function print_internet() {
@@ -1498,6 +1660,7 @@ function system_info() {
     print_fqdn
     print_os
     print_cpu_and_ram
+    print_swap
     print_disks
     print_free_space
     print_cloudera_rpms
@@ -1605,6 +1768,22 @@ function is_centos_rhel_7() {
     fi
 }
 
+function is_centos_rhel_8() {
+    if [ -f /etc/redhat-release ] && grep -q " 8." /etc/redhat-release; then
+        return 0;
+    else
+        return 1;
+    fi
+}
+
+function is_centos_rhel_9() {
+    if [ -f /etc/redhat-release ] && grep -q " 9." /etc/redhat-release; then
+        return 0;
+    else
+        return 1;
+    fi
+}
+
 function reset_service_state() {
     SERVICE_STATE['installed']=false
     SERVICE_STATE['running']=false
@@ -1623,7 +1802,7 @@ function get_service_state() {
 
     reset_service_state
 
-    if is_centos_rhel_7; then
+    if is_centos_rhel_7 || is_centos_rhel_8 || is_centos_rhel_9; then
         local sub_state
         sub_state=$(systemctl show "$service_name" --type=service --property=SubState 2</dev/null | sed -e 's/^.*=//')
         case $sub_state in
@@ -1683,7 +1862,7 @@ function usage() {
     echo "  -a, --addc $(tput smul)domain$(tput sgr0)"
     echo "    Run tests against Active Directory Domain Controller"
     echo
-    echo "  -p, --privilegetest $(tput smul)ldapURI$(tput sgr0) $(tput smul)binddn$(tput sgr0) $(tput smul)searchbase$(tput sgr0) $(tput smul)bind_user_password$(tput sgr0)"
+    echo "  -p, --privilegetest $(tput smul)LdapURI$(tput sgr0) $(tput smul)KDC_Manager$(tput sgr0) $(tput smul)ClouderaOU_DN$(tput sgr0) $(tput smul)KDC_Manager_Password$(tput sgr0)"
     echo "    Run tests against Active Directory delegated user for Direct to AD integration"
     echo "    http://blog.cloudera.com/blog/2014/07/new-in-cloudera-manager-5-1-direct-active-directory-integration-for-kerberos-authentication/"
     echo 
