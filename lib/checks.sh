@@ -563,6 +563,133 @@ function check_jdbc_connector() {
     fi
 }
 
+function check_python() {
+    # Supported Python versions for CDP Private Cloud Base 7.1.9 SP1
+    # (Cloudera Support Matrix, https://supportmatrix.cloudera.com/,
+    # CDP Private Cloud Base -> 7.1.9 SP1, read 2026-09-01):
+    #   3.11, 3.10, 3.9, 3.8, 3.7, 3.6, 2.7
+    # Per-OS floors and patch minimums, from
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-cm-install-python-3.8.html
+    # ("Installing Python 3" — "You must install Python 3.8.12 or higher on
+    # all cluster hosts before installing Cloudera Manager", "The minimum
+    # required version of Python 3.8 is 3.8.12. The minimum version of
+    # Python 3.9 is 3.9.14." and the per-OS table: RHEL 8.x requires
+    # Python 3.8, RHEL 9.x requires Python 3.9, RHEL 7 must build 3.8
+    # from source):
+    #   RHEL 7: Python 3.8 (3.8.12+), not in RHEL7 repos — source build
+    #   RHEL 8: Python 3.8 (3.8.12+)
+    #   RHEL 9: Python 3.9 (3.9.14+)
+    local rhel_major
+    rhel_major=$(get_centos_rhel_major_version)
+
+    # Display form and numeric floor for this OS. The patch-level floor
+    # applies only to the required minor line: a newer minor (e.g. 3.11 on
+    # RHEL 8) is fine per the Support Matrix regardless of its patch number.
+    local required_version="3.8.12"
+    local required_minor=8
+    local required_patch=12
+    case "$rhel_major" in
+        7) required_version="3.8.12 (Python 3.8; must be built from source on RHEL 7)" ;;
+        8) required_version="3.8.12"; required_minor=8; required_patch=12 ;;
+        9) required_version="3.9.14"; required_minor=9; required_patch=14 ;;
+        *) required_version="3.8.12 or 3.9.14 depending on OS (see doc)"; required_minor=8; required_patch=12 ;;
+    esac
+
+    # The interpreter CM agents will actually invoke. This script is run as
+    # root on target hosts, so "command -v python3" resolves the same way the
+    # CM agent sees it (not a user-level venv/pyenv shim).
+    local python3_bin
+    python3_bin=$(command -v python3 2>/dev/null)
+    if [ -z "$python3_bin" ]; then
+        state "Python: python3 not found on PATH. CDP requires Python 3 (minimum $required_version). Install python3 via the OS package manager (e.g. dnf install python3) or from source." 1
+        return 1
+    fi
+
+    # Older Python 3 builds print the version to stderr, so capture both.
+    local active_version
+    active_version=$("$python3_bin" --version 2>&1 | awk '{print $2}')
+
+    # Enumerate all python3.x interpreters on the host, not just the one
+    # first on PATH: RHEL hosts can have multiple (e.g. python3.6 from the OS
+    # plus python39/python3.11 module streams) and Cloudera Manager picks
+    # the interpreter per host configuration. Sources:
+    #  - "alternatives" symlinks (RHEL's update-alternatives registry)
+    #  - /usr/bin/python3.* and /usr/local/bin/python3.* convention
+    local -a found=()
+    local -a versions=()
+    local -a scan_paths=()
+    local p
+    # alternatives --list format: "name auto priority path" (RHEL 8/9) or
+    # tab-separated columns on RHEL 7; just take the path column and filter
+    # for python3 executables.
+    while read -r p; do
+        [ -n "$p" ] && scan_paths+=("$p")
+    done <<< "$(alternatives --list 2>/dev/null | awk '$1 ~ /^python3/ {print $NF}')"
+    # shellcheck disable=SC2045
+    for p in $(ls -d /usr/bin/python3.* /usr/local/bin/python3.* 2>/dev/null); do
+        if [ -x "$p" ] && [ ! -L "$p" ]; then
+            scan_paths+=("$p")
+        fi
+    done
+    # Keep real executables, deduplicated (the python3.6 "binaries" under
+    # /usr/bin can be symlinks; the version probe skips anything that does
+    # not report a version).
+    local seen=''
+    local v
+    for p in "${scan_paths[@]}"; do
+        [ -x "$p" ] || continue
+        case "$seen" in *"|$p|"*) continue ;; esac
+        seen="|$p|${seen}"
+        v=$("$p" --version 2>&1 | awk '{print $2}')
+        [ -z "$v" ] && continue
+        found+=("$p")
+        versions+=("$v")
+    done
+
+    # Report every detected interpreter with its path.
+    local i
+    for i in "${!versions[@]}"; do
+        state "Python: ${found[$i]} -> ${versions[$i]}" 0
+    done
+
+    # Validate the active PATH-resolved interpreter against the doc floor for
+    # this OS. Version string form: "3.8.12", "3.9.14", "3.11.4", or even
+    # "3.8" (patch omitted). A version on a NEWER minor than the required
+    # line passes regardless of patch number (Support Matrix supports
+    # 3.9-3.11 on SP1); the patch floor only bites on the required minor
+    # itself (e.g. 3.8.x < 3.8.12 on RHEL 8).
+    local active_minor active_patch
+    active_minor=$(echo "$active_version" | cut -d. -f2)
+    active_patch=$(echo "$active_version" | cut -d. -f3)
+    local unsupported_reason=""
+    if [ -z "$active_minor" ]; then
+        unsupported_reason="could not parse version from '$python3_bin --version' (got '$active_version')"
+    elif [ "$active_minor" -lt "$required_minor" ]; then
+        unsupported_reason="Python $active_version is below the required Python 3.$required_minor ($required_version) for this OS"
+    elif [ "$active_minor" -eq "$required_minor" ] && [ -n "$active_patch" ] && [ "$active_patch" -lt "$required_patch" ]; then
+        unsupported_reason="Python $active_version is below the minimum patch level ($required_version)"
+    fi
+
+    if [ -n "$unsupported_reason" ]; then
+        state "Python: $python3_bin is $active_version — $unsupported_reason. See https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-cm-install-python-3.8.html" 1
+        return 1
+    fi
+
+    # Active interpreter meets the floor. If other python3.x interpreters
+    # exist that are below the floor, warn: CM agent configuration may point
+    # at any of them.
+    for i in "${!versions[@]}"; do
+        local v_minor v_patch
+        v_minor=$(echo "${versions[$i]}" | cut -d. -f2)
+        v_patch=$(echo "${versions[$i]}" | cut -d. -f3)
+        if [ -n "$v_minor" ] && { [ "$v_minor" -lt "$required_minor" ] || { [ "$v_minor" -eq "$required_minor" ] && [ -n "$v_patch" ] && [ "$v_patch" -lt "$required_patch" ]; }; }; then
+            state "Python: additional interpreter ${found[$i]} is ${versions[$i]}, below the $required_version floor — fine unless CM is configured to use it" 2
+        fi
+    done
+
+    state "Python: Active python3 is $active_version at $python3_bin; required minimum for RHEL $rhel_major is $required_version" 0
+}
+
 function check_network() (
 
     function check_hostname() {
@@ -774,6 +901,7 @@ function checks() (
     check_firewall
     check_fapolicyd
     check_java
+    check_python
     check_database
     check_jdbc_connector
 )
