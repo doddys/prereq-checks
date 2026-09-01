@@ -114,6 +114,31 @@ function print_disks() (
     fi
 )
 
+function print_config_files() {
+    local -a files=(/etc/resolv.conf /etc/nsswitch.conf /etc/krb5.conf /etc/sssd/sssd.conf)
+    local f
+    for f in /etc/sssd/conf.d/*.conf; do
+        [ -f "$f" ] && files+=("$f")
+    done
+    for f in "${files[@]}"; do
+        echo "$f:"
+        if [ -f "$f" ]; then
+            # sssd.conf (and any conf.d drop-in) can carry a plaintext LDAP
+            # bind password (ldap_default_authtok) when SSSD uses simple
+            # bind rather than Kerberos/GSSAPI — redact any *authtok*/
+            # *password* key's value rather than skip the file, so the
+            # rest of the config (providers, KDC/LDAP URIs, domains) is
+            # still useful for diagnosis without leaking a live credential.
+            sed -E 's/^([[:space:]]*[a-z0-9_]*(authtok|password)[a-z0-9_]*[[:space:]]*=[[:space:]]*).*/\1[REDACTED]/' "$f" | \
+                while IFS= read -r line; do
+                    pad; echo "$line"
+                done
+        else
+            pad; echo "not found"
+        fi
+    done
+}
+
 function print_lsblk() {
     echo "lsblk:"
     if command -v lsblk >/dev/null 2>&1; then
@@ -219,5 +244,6 @@ function system_info() {
     print_cloudera_rpms
     print_time
     print_network
+    print_config_files
     print_internet
 }
