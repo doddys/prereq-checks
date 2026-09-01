@@ -866,30 +866,10 @@ function check_java() {
       '/usr/lib/jvm/zulu11'
       '/usr/lib/jvm/java-11-zulu-openjdk'
     )
-    local JAVA6_HOME_CANDIDATES=(
-        '/usr/lib/j2sdk1.6-sun'
-        '/usr/lib/jvm/java-6-sun'
-        '/usr/lib/jvm/java-1.6.0-sun-1.6.0'
-        '/usr/lib/jvm/j2sdk1.6-oracle'
-        '/usr/lib/jvm/j2sdk1.6-oracle/jre'
-        '/usr/java/jdk1.6'
-        '/usr/java/jre1.6'
-    )
-    local OPENJAVA6_HOME_CANDIDATES=(
-        '/usr/lib/jvm/java-1.6.0-openjdk'
-        '/usr/lib/jvm/jre-1.6.0-openjdk'
-    )
-    local JAVA7_HOME_CANDIDATES=(
-        '/usr/java/jdk1.7'
-        '/usr/java/jre1.7'
-        '/usr/lib/jvm/j2sdk1.7-oracle'
-        '/usr/lib/jvm/j2sdk1.7-oracle/jre'
-        '/usr/lib/jvm/java-7-oracle'
-    )
-    local OPENJAVA7_HOME_CANDIDATES=(
-        '/usr/lib/jvm/java-1.7.0-openjdk'
-        '/usr/lib/jvm/java-7-openjdk'
-    )
+    # JDK 6 and 7 candidate paths are intentionally gone: the supported JDK
+    # floor for CDP Private Cloud Base 7.1.9 is JDK 8 (Support Matrix,
+    # CDP 7.1.9 SP1: OpenJDK/OracleJDK/AzulJDK all list JDK 8 as the lowest
+    # supported line; JDK 6/7 do not appear for any vendor).
     local JAVA8_HOME_CANDIDATES=(
       '/usr/java/jdk1.8'
       '/usr/java/jdk8'
@@ -917,21 +897,17 @@ function check_java() {
     local JAVA_HOME_CANDIDATES=(
         "${JAVA17_HOME_CANDIDATES[@]}"
         "${JAVA11_HOME_CANDIDATES[@]}"
-        "${JAVA7_HOME_CANDIDATES[@]}"
         "${JAVA8_HOME_CANDIDATES[@]}"
-        "${JAVA6_HOME_CANDIDATES[@]}"
         "${MISCJAVA_HOME_CANDIDATES[@]}"
         "${OPENJAVA17_HOME_CANDIDATES[@]}"
         "${OPENJAVA11_HOME_CANDIDATES[@]}"
-        "${OPENJAVA7_HOME_CANDIDATES[@]}"
         "${OPENJAVA8_HOME_CANDIDATES[@]}"
-        "${OPENJAVA6_HOME_CANDIDATES[@]}"
     )
 
     function get_jdk_type() {
        java=$1
-       JDK_TYPE=$($java -version 2>&1 | head -2 | tail -1 | awk '{print $1}') 
-  
+       JDK_TYPE=$($java -version 2>&1 | head -2 | tail -1 | awk '{print $1}')
+
        case $JDK_TYPE in
            Java\(TM\) )
                echo "Oracle";;
@@ -948,9 +924,27 @@ function check_java() {
     }
 
     # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-java-requirements.html
-    # JDK 8 minimum required version is 1.8u181
-    # OpenJDK 8 minimum required version is 1.8u232
-    # Azul JDK 8 minimum required version is 8.56.0.21
+    # Supported JDK lines for CDP Private Cloud Base 7.1.9 (same for 7.1.9
+    # SP1, Support Matrix): Oracle JDK 8/11/17, OpenJDK 8/11/17, Azul JDK
+    # 8/11/17. JDK 21 is NOT supported for any vendor (Support Matrix,
+    # CDP 7.1.9 SP1).
+    # Minimum versions (cdpdc-java-requirements.html):
+    #   JDK 8:  Oracle 1.8u181 (minimum required version)
+    #           OpenJDK 1.8u232 (minimum required version; 1.8u231 is the
+    #                            minimum for FIPS)
+    #           Azul 8.56.0.21 (minimum required version)
+    #   JDK 11: no general minimum version is documented. Tested/recommended
+    #           builds listed by the doc: Oracle 11.0.10+8, OpenJDK
+    #           11.0.4+11 (11.0.3 is the minimum for FIPS), Azul 11.50.19.
+    #   JDK 17: no general minimum version is documented. Tested/recommended
+    #           builds listed by the doc: Oracle 17.0.6, OpenJDK 17.0.7
+    #           (17.0.2 is the minimum for FIPS), Azul 17.0.7.
+    # TODO: task.md records an "Azul JDK 17 minimum build 11.50.19+" from the
+    # Support Matrix, but 11.50.19 is the Azul JDK *11* build per the doc
+    # above; the Azul JDK 17 tested build is 17.0.7. No authoritative Azul
+    # JDK 17 minimum build could be confirmed — the check therefore applies
+    # no Azul-specific JDK 17 floor, and this is flagged for manual
+    # verification in the PR.
     java_found=false
     for candidate_regex in "${JAVA_HOME_CANDIDATES[@]}"; do
         # shellcheck disable=SC2045,SC2086
@@ -958,64 +952,92 @@ function check_java() {
             if [ -x "$candidate/bin/java" ]; then
                 java_found=true
                 JDK_VERSION=$($candidate/bin/java -version 2>&1 | head -1 | awk '{print $3}' | tr -d '"')
-                JDK_VERSION_REGEX='(1|11)\.([0-9])\.([0-9_]*)'
-                JDK_8_MINOR_VERSION_REGEX='1\.8\.0_([0-9]*)'
+                # Legacy scheme up to JDK 8: "1.8.0_311" (also "1.7.0_80" etc.)
+                # Modern scheme JDK 9+: "11.0.20", "17.0.9", "21.0.1".
+                JDK_LEGACY_VERSION_REGEX='^1\.([0-9]+)\.'
+                JDK_MODERN_VERSION_REGEX='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+                JDK_8_UPDATE_REGEX='^1\.8\.0_([0-9]+)'
+                JDK_MODERN_VERSION_REGEX='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+                JDK_8_UPDATE_REGEX='^1\.8\.0_([0-9]+)'
                 JDK_TYPE=$(get_jdk_type "$candidate/bin/java")
                 support=true
 
-                if [[ $JDK_VERSION =~ $JDK_VERSION_REGEX ]]; then
-                    if [[ ${BASH_REMATCH[1]} -eq 1 ]]; then
-                        if [[ ${BASH_REMATCH[2]} -eq 8 ]]; then
-                            if [[ $JDK_TYPE == "Azul" ]]; then
-                                # Azul JDK 1.8.0_XXX
-                                # Azul JDK uses a different build versioning convention
-                                AZUL_BUILD=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $5}' | cut -d'-' -f1)
-                                AZUL_BUILD_REGEX='8\.([0-9]*)\.([0-9]*)\.([0-9]*)'
-                                if [[ $AZUL_BUILD =~ $AZUL_BUILD_REGEX ]]; then
-                                    # Check if Azul build is lower than 8.56.0.21 which is the minimum required version
-                                    if [[ ${BASH_REMATCH[1]} -lt 56 ]]; then
-                                        support=false
-                                    elif [[ ${BASH_REMATCH[1]} -eq 56 ]] && [[ ${BASH_REMATCH[3]} -lt 21 ]]; then
-                                        support=false
-                                    else
-                                        support=true
-                                    fi
-                                else
-                                    support=false
-                                fi
+                if [[ $JDK_VERSION =~ $JDK_LEGACY_VERSION_REGEX ]]; then
+                    jdk_major=${BASH_REMATCH[1]}
+                    if [[ $jdk_major -ne 8 ]]; then
+                        # Only JDK 8 remains supported on the legacy 1.x
+                        # scheme (Support Matrix, CDP 7.1.9 SP1).
+                        support=false
+                    elif [[ $JDK_TYPE == "Azul" ]]; then
+                        # Azul JDK 1.8.0_XXX
+                        # Azul JDK uses a different build versioning convention
+                        AZUL_BUILD=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $5}' | cut -d'-' -f1)
+                        AZUL_BUILD_REGEX='8\.([0-9]*)\.([0-9]*)\.([0-9]*)'
+                        if [[ $AZUL_BUILD =~ $AZUL_BUILD_REGEX ]]; then
+                            # Check if Azul build is lower than 8.56.0.21 which is the minimum required version
+                            if [[ ${BASH_REMATCH[1]} -lt 56 ]]; then
+                                support=false
+                            elif [[ ${BASH_REMATCH[1]} -eq 56 ]] && [[ ${BASH_REMATCH[3]} -lt 21 ]]; then
+                                support=false
                             else
-                                # Oracle or OpenJDK 1.8.0_XXX
-                                if [[ $JDK_VERSION =~ $JDK_8_MINOR_VERSION_REGEX ]]; then
-                                    if [[ $JDK_TYPE == "Oracle" ]] && [[ ${BASH_REMATCH[1]} -lt 181 ]]; then
-                                        support=false
-                                    elif [[ $JDK_TYPE == "OpenJDK" ]] && [[ ${BASH_REMATCH[1]} -lt 232 ]]; then
-                                        support=false
-                                    else
-                                        support=true
-                                    fi
-                                else
-                                    support=false
-                                fi
+                                support=true
                             fi
-                        else
-                             support=false
-                        fi
-                    elif [[ ${BASH_REMATCH[1]} -eq 11 ]]; then
-                        # Oracle, OpenJDK and Azul Java 11 are all supported
-                        if [[ $JDK_TYPE != "Unknown" ]]; then
-                            support=true
                         else
                             support=false
                         fi
                     else
-                        support=false
+                        # Oracle or OpenJDK 1.8.0_XXX
+                        if [[ $JDK_VERSION =~ $JDK_8_UPDATE_REGEX ]]; then
+                            if [[ $JDK_TYPE == "Oracle" ]] && [[ ${BASH_REMATCH[1]} -lt 181 ]]; then
+                                support=false
+                            elif [[ $JDK_TYPE == "OpenJDK" ]] && [[ ${BASH_REMATCH[1]} -lt 232 ]]; then
+                                support=false
+                            else
+                                support=true
+                            fi
+                        else
+                            support=false
+                        fi
                     fi
+                elif [[ $JDK_VERSION =~ $JDK_MODERN_VERSION_REGEX ]]; then
+                    jdk_major=${BASH_REMATCH[1]}
+                    case $jdk_major in
+                        11)
+                            # Oracle, OpenJDK and Azul Java 11 are all supported;
+                            # no general minimum version is documented (see
+                            # comment above for the tested/recommended builds).
+                            if [[ $JDK_TYPE != "Unknown" ]]; then
+                                support=true
+                            else
+                                support=false
+                            fi
+                            ;;
+                        17)
+                            # Oracle, OpenJDK and Azul Java 17 are all supported
+                            # (Support Matrix, CDP 7.1.9 SP1). No general
+                            # minimum version is documented (see comment above
+                            # for the tested builds and the Azul TODO).
+                            if [[ $JDK_TYPE != "Unknown" ]]; then
+                                support=true
+                            else
+                                support=false
+                            fi
+                            ;;
+                        21)
+                            # JDK 21 is NOT supported for any vendor (Support
+                            # Matrix, CDP 7.1.9 SP1).
+                            support=false
+                            ;;
+                        *)
+                            support=false
+                            ;;
+                    esac
+                else
+                    support=false
+                fi
 
-                    if [[ $support == true ]]; then
-                        state "Java: Supported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 0
-                    else
-                        state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
-                    fi
+                if [[ $support == true ]]; then
+                    state "Java: Supported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 0
                 else
                     state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
                 fi
@@ -1028,6 +1050,62 @@ function check_java() {
 }
 
 function check_os() (
+    function check_rhel_version_support() {
+        # Supported RHEL minor versions for CDP Private Cloud Base 7.1.9 SP1,
+        # from the Cloudera Support Matrix (https://supportmatrix.cloudera.com/,
+        # Products -> CDP Private Cloud Base -> 7.1.9 SP1 -> Operating Systems,
+        # read 2026-09-01 as recorded in the task list; FIPS variants listed
+        # where the matrix supports them):
+        #   RHEL 7:  7.8, 7.9            (+ FIPS variants)
+        #   RHEL 8:  8.2, 8.4, 8.6, 8.9, 8.10; 8.8 only in the 8.8 FIPS
+        #            variant (plain 8.8 not listed); 8.7 not listed;
+        #            8.10 FIPS supported
+        #   RHEL 9:  9.1, 9.2, 9.5, 9.6, 9.7 (9.3 and 9.4 not listed; 9.6
+        #            FIPS not listed)
+        # TODO: the plain-8.8-unsupported-but-8.8-FIPS-supported split and the
+        # 9.2 -> 9.5 (skipping 9.3/9.4) jump are unusual; re-verify in the
+        # Support Matrix before relying on them (flagged in the PR).
+        local rhel_version
+        rhel_version=$(get_centos_rhel_version)
+        if [ -z "$rhel_version" ]; then
+            # Not CentOS/RHEL — the matrix here is RHEL-specific; other
+            # distros are validated by their own entries and not by this
+            # check.
+            return 0
+        fi
+
+        local fips=unknown
+        if command -v fips-mode-setup >/dev/null 2>&1; then
+            # RHEL 8+: canonical FIPS state check
+            if fips-mode-setup --check 2>/dev/null | grep -q "is enabled"; then
+                fips=true
+            else
+                fips=false
+            fi
+        elif [ -r /proc/cmdline ] && grep -q "fips=1" /proc/cmdline; then
+            # RHEL 7 fallback: fips-mode-setup is RHEL 8+ only
+            fips=true
+        fi
+
+        local msg="System: RHEL $rhel_version support for CDP Private Cloud Base 7.1.9 SP1"
+        case "$rhel_version" in
+            7.8|7.9|8.2|8.4|8.6|8.9|8.10|9.1|9.2|9.5|9.6|9.7)
+                state "$msg (FIPS: $fips)" 0
+                ;;
+            8.8)
+                # Plain 8.8 is not in the matrix; 8.8 FIPS is.
+                if [ "$fips" = true ]; then
+                    state "$msg in FIPS mode" 0
+                else
+                    state "$msg: 8.8 is only supported in the FIPS variant (Support Matrix, CDP 7.1.9 SP1). Actual FIPS state: $fips" 1
+                fi
+                ;;
+            *)
+                state "$msg: this RHEL minor version is not in the Support Matrix (FIPS: $fips). See https://supportmatrix.cloudera.com/" 1
+                ;;
+        esac
+    }
+
     function check_swappiness() {
         # http://www.cloudera.com/content/www/en-us/documentation/enterprise/latest/topics/cdh_admin_performance.html#xd_583c10bfdbd326ba-7dae4aa6-147c30d0933--7fd5__section_xpq_sdf_jq
         local swappiness
@@ -1053,20 +1131,42 @@ function check_os() (
     }
 
     function check_tuned() {
-        # "tuned" service should be disabled on RHEL/CentOS 7.x
-        # https://www.cloudera.com/documentation/enterprise/latest/topics/cdh_admin_performance.html#xd_583c10bfdbd326ba-7dae4aa6-147c30d0933--7fd5__disable-tuned
-        if is_centos_rhel_7; then
-            systemctl status tuned &>/dev/null
-            case $? in
-                0) state "System: tuned is running" 1;;
-                3) state "System: tuned is not running" 0;;
-                *) state "System: tuned is not installed" 0;;
-            esac
-            if [ "$(systemctl is-enabled tuned 2>/dev/null)" == "enabled" ]; then
-                state "System: tuned auto-starts on boot" 1
-            else
-                state "System: tuned does not auto-start on boot" 0
-            fi
+        # "tuned" service should be disabled on RHEL/CentOS hosts: an active
+        # tuned profile can silently re-enable transparent hugepages (which
+        # must stay disabled,
+        # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/managing-clusters/topics/cm-disabling-transparent-hugepages.html
+        # for "RHEL/CentOS 7.x, 8.x, and 9.x") after the THP settings have
+        # been applied.
+        # The disable-tuned instruction itself is documented for RHEL/CentOS
+        # 7.x only: "If your cluster hosts are running RHEL/CentOS 7.x,
+        # disable the "tuned" service" (Cloudera Enterprise "Optimizing
+        # Performance in CDH",
+        # https://docs.cloudera.com/documentation/enterprise/latest/topics/cdh_admin_performance.html
+        # — page no longer online; archived copy via web.archive.org,
+        # snapshot 2024-03-02). The CDP 7.1.9 documentation book has no
+        # tuned guidance at all, so on RHEL 8/9 a running tuned daemon is a
+        # warning (THP re-enable risk) rather than a hard failure.
+        local rhel_major
+        rhel_major=$(get_centos_rhel_major_version)
+        # tuned check is systemd-based and Cloudera-documented for RHEL 7+;
+        # silently skip anything else (mirrors the old RHEL7-only gate).
+        if [ -z "$rhel_major" ] || [ "$rhel_major" -lt 7 ]; then
+            return 0
+        fi
+        local fail_flag=1
+        if [ "$rhel_major" -ge 8 ]; then
+            fail_flag=2
+        fi
+        systemctl status tuned &>/dev/null
+        case $? in
+            0) state "System: tuned is running" $fail_flag;;
+            3) state "System: tuned is not running" 0;;
+            *) state "System: tuned is not installed" 0;;
+        esac
+        if [ "$(systemctl is-enabled tuned 2>/dev/null)" == "enabled" ]; then
+            state "System: tuned auto-starts on boot" $fail_flag
+        else
+            state "System: tuned does not auto-start on boot" 0
         fi
     }
 
@@ -1130,31 +1230,53 @@ function check_os() (
         esac
     }
 
-    # Check that the system clock is synced by either ntpd or chronyd. Chronyd
-    # is on CentOS/RHEL 7 and above only.
-    # https://community.cloudera.com/t5/Cloudera-Manager-Installation/Should-Cloudera-NTP-use-Chrony-or-NTPD/td-p/55986
+    # Check that the system clock is synced by either ntpd or chronyd.
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-enable-NTP-service.html
+    # "Runtime requires that you configure a Network Time Protocol (NTP)
+    # service on each machine in your cluster." — the doc accepts either
+    # daemon ("Most operating systems include the ntpd service", "Some
+    # operating systems use chronyd by default") and warns that running both
+    # at once makes Cloudera Manager report clock offset errors even when
+    # time is correct.
+    # The old "kudu supports only ntpd" warning is obsolete: upstream Kudu
+    # requirements list "ntp or chrony"
+    # (https://kudu.apache.org/docs/installation.html, "Operating System
+    # Requirements"), and chronyd is the default NTP daemon on RHEL 8/9.
     function check_time_sync() (
         function is_ntp_in_sync() {
-            if [ "$(ntpstat | grep -c "synchronised to NTP server")" -eq 1 ]; then
+            if [ "$(ntpstat 2>/dev/null | grep -c "synchronised to NTP server")" -eq 1 ]; then
                 state "System: ntpd clock synced" 0
             else
                 state "System: ntpd clock NOT synced. Check 'ntpstat'" 1
             fi
         }
 
-        if is_centos_rhel_7; then
+        function is_chrony_in_sync() {
+            if chronyc tracking 2>/dev/null | grep -q "Leap status     : Normal"; then
+                state "System: chronyd clock synced" 0
+            else
+                state "System: chronyd clock NOT synced. Check 'chronyc tracking'" 1
+            fi
+        }
+
+        if [ -n "$(get_centos_rhel_major_version)" ]; then
+            # ntpd and chronyd are both acceptable on RHEL/CentOS 7/8/9, but
+            # only one of them should run at a time.
             get_service_state 'ntpd'
-            if [ "${SERVICE_STATE['running']}" = true ]; then
-                # If ntpd is running, then chrony shouldn't be
+            local ntpd_running=${SERVICE_STATE['running']}
+            get_service_state 'chronyd'
+            local chronyd_running=${SERVICE_STATE['running']}
+
+            if $ntpd_running && $chronyd_running; then
+                state "System: Both ntpd and chronyd are running. Only one NTP daemon should run; running both makes Cloudera Manager report clock offset errors. Disable one of them." 1
+            elif $ntpd_running; then
                 _check_service_is_running 'System' 'ntpd'
                 is_ntp_in_sync
-                _check_service_is_not_running 'System' 'chronyd'
-            else
+            elif $chronyd_running; then
                 _check_service_is_running 'System' 'chronyd'
-                get_service_state 'chronyd'
-                if [ "${SERVICE_STATE['running']}" = true ]; then
-                    state "System: kudu supports only ntpd. If kudu is not used, this warning can be ignored." 2
-                fi
+                is_chrony_in_sync
+            else
+                state "System: Neither ntpd nor chronyd is running. An NTP service must run on every cluster host." 1
             fi
         else
             _check_service_is_running 'System' 'ntpd'
@@ -1205,6 +1327,7 @@ function check_os() (
             state "System: Entropy should be more than 500, Actual: $entropy -- Please see https://bit.ly/2IoOj0K" 2
         fi
     }
+    check_rhel_version_support
     check_swappiness
     check_overcommit_memory
     check_tuned
@@ -1220,40 +1343,94 @@ function check_os() (
 )
 
 function check_database() {
-    local VERSION_PATTERN='([0-9][0-9]*\.[0-9][0-9]*)\.[0-9][0-9]*'
-    local mysql_ver=''
-    local mysql_rpm=''
-    local mysql_ent
-    local mysql_com
+    # Supported database versions for CDP Private Cloud Base 7.1.9 SP1
+    # (Cloudera Support Matrix, https://supportmatrix.cloudera.com/,
+    # CDP Private Cloud Base -> 7.1.9 SP1 -> Databases, read 2026-09-01):
+    #   MySQL:    8.4, 8.0, 5.7         (5.6 supported on base 7.1.9 but NOT on SP1)
+    #   MariaDB:  10.11, 10.6, 10.5, 10.4 (10.3 and 10.2 NOT supported on SP1)
+    #   PostgreSQL: 17, 16, 15, 14, 13, 12 (11 and 10 NOT supported on SP1)
+    #   OracleDB: 23c, 21c, 19c, 19, RAC 19
+    # Notes:
+    # - These are the versions supported as the Cloudera Manager / cluster
+    #   backend. Only a server installed locally (same host as Cloudera
+    #   Manager) can be detected here; a backend on a remote host is not
+    #   visible to this check.
+    # - OracleDB is not RPM-detectable on cluster hosts (an Oracle backend
+    #   normally runs on its own server); the JDBC/connector check and the
+    #   Cloudera Manager install wizard cover it, so this check skips it.
 
-    mysql_ent=$(rpm -q --queryformat='%{VERSION}' mysql-commercial-server)
+    # Report on a single server RPM. $1: engine label, $2: rpm name,
+    # $3: supported-version list (comma-separated, no spaces), $4: rpm
+    # version string, $5: "major" to compare only the major version
+    # (PostgreSQL) or "major.minor" (default; MySQL/MariaDB).
+    function report_db_version() {
+        local engine="$1"
+        local rpm_name="$2"
+        local supported_list="$3"
+        local rpm_version="$4"
+        local version_mode="${5:-major.minor}"
+        local ver
+        if [[ $version_mode == major ]]; then
+            [[ $rpm_version =~ ([0-9]+) ]] || return 1
+            ver=${BASH_REMATCH[1]}
+        else
+            # RPM VERSION fields are usually X.Y.Z, but module/Software-
+            # Collection builds can carry X.Y only — compare major.minor.
+            [[ $rpm_version =~ ([0-9]+)\.([0-9]+) ]] || return 1
+            ver="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        fi
+        local rpm_full
+        rpm_full=$(rpm -q "$rpm_name")
+        # NB: a case pattern cannot be built from a variable (the "|"
+        # alternation is parsed, not expanded), so match by containment
+        # against the comma-delimited list instead.
+        if [[ ",$supported_list," == *",$ver,"* ]]; then
+            state "Database: Supported $engine server installed ($ver). $rpm_full" 0
+        else
+            state "Database: Unsupported $engine server installed ($ver). $rpm_full (supported on CDP 7.1.9 SP1: $(echo "$supported_list" | tr ',' ' '))" 1
+        fi
+        return 0
+    }
+
+    local found_any=false
+    local rpm_version
+
+    for rpm_name in mysql-commercial-server mysql-community-server; do
+        rpm_version=$(rpm -q --queryformat='%{VERSION}' "$rpm_name" 2>/dev/null)
+        # shellcheck disable=SC2181
+        if [[ $? -eq 0 ]] && report_db_version 'MySQL' "$rpm_name" '8.4,8.0,5.7' "$rpm_version"; then
+            found_any=true
+        fi
+    done
+
+    rpm_version=$(rpm -q --queryformat='%{VERSION}' mariadb-server 2>/dev/null)
     # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]]; then
-        mysql_rpm=$(rpm -q mysql-commercial-server)
-        [[ $mysql_ent =~ $VERSION_PATTERN ]]
-        mysql_ver=${BASH_REMATCH[1]}
+    if [[ $? -eq 0 ]] && report_db_version 'MariaDB' 'mariadb-server' '10.11,10.6,10.5,10.4' "$rpm_version"; then
+        found_any=true
     fi
 
-    mysql_com=$(rpm -q --queryformat='%{VERSION}' mysql-community-server)
-    # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]]; then
-        mysql_rpm=$(rpm -q mysql-community-server)
-        [[ $mysql_com =~ $VERSION_PATTERN ]]
-        mysql_ver=${BASH_REMATCH[1]}
-    fi
-    if [[ -z "$mysql_ver" ]]; then
-        state "Database: MySQL server not installed, skipping version check" 2
-        return
-    fi
+    # PostgreSQL server RPM naming varies by repo: "postgresql-server"
+    # (RHEL app-stream), "postgresqlNN-server" (PGDG), or
+    # "rh-postgresqlNN-postgresql-server" (Software Collections). Querying
+    # this bounded candidate list directly is more reliable than parsing
+    # names back out of "rpm -qa" output (which embeds version-release).
+    local pg_rpm_name
+    # shellcheck disable=SC2013
+    for pg_rpm_name in postgresql-server \
+                       postgresql12-server postgresql13-server postgresql14-server \
+                       postgresql15-server postgresql16-server postgresql17-server \
+                       rh-postgresql12-postgresql-server rh-postgresql13-postgresql-server \
+                       rh-postgresql14-postgresql-server rh-postgresql15-postgresql-server; do
+        rpm_version=$(rpm -q --queryformat='%{VERSION}' "$pg_rpm_name" 2>/dev/null)
+        # shellcheck disable=SC2181
+        if [[ $? -eq 0 ]] && report_db_version 'PostgreSQL' "$pg_rpm_name" '17,16,15,14,13,12' "$rpm_version" 'major'; then
+            found_any=true
+        fi
+    done
 
-    case "$mysql_ver" in
-        '5.1'|'5.5'|'5.6'|'5.7')
-            state "Database: Supported MySQL server installed. $mysql_rpm" 0
-            ;;
-        *)
-            state "Database: Unsupported MySQL server installed. $mysql_rpm" 1
-            ;;
-    esac
+    if [[ $found_any == false ]]; then
+        state "Database: No database server RPM installed locally, skipping version check (remote backends are not detected here)" 2
+    fi
 }
 
 function check_jdbc_connector() {
@@ -1265,6 +1442,133 @@ function check_jdbc_connector() {
     else
         state "Database: MySQL JDBC Driver is not installed" 2
     fi
+}
+
+function check_python() {
+    # Supported Python versions for CDP Private Cloud Base 7.1.9 SP1
+    # (Cloudera Support Matrix, https://supportmatrix.cloudera.com/,
+    # CDP Private Cloud Base -> 7.1.9 SP1, read 2026-09-01):
+    #   3.11, 3.10, 3.9, 3.8, 3.7, 3.6, 2.7
+    # Per-OS floors and patch minimums, from
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-cm-install-python-3.8.html
+    # ("Installing Python 3" — "You must install Python 3.8.12 or higher on
+    # all cluster hosts before installing Cloudera Manager", "The minimum
+    # required version of Python 3.8 is 3.8.12. The minimum version of
+    # Python 3.9 is 3.9.14." and the per-OS table: RHEL 8.x requires
+    # Python 3.8, RHEL 9.x requires Python 3.9, RHEL 7 must build 3.8
+    # from source):
+    #   RHEL 7: Python 3.8 (3.8.12+), not in RHEL7 repos — source build
+    #   RHEL 8: Python 3.8 (3.8.12+)
+    #   RHEL 9: Python 3.9 (3.9.14+)
+    local rhel_major
+    rhel_major=$(get_centos_rhel_major_version)
+
+    # Display form and numeric floor for this OS. The patch-level floor
+    # applies only to the required minor line: a newer minor (e.g. 3.11 on
+    # RHEL 8) is fine per the Support Matrix regardless of its patch number.
+    local required_version="3.8.12"
+    local required_minor=8
+    local required_patch=12
+    case "$rhel_major" in
+        7) required_version="3.8.12 (Python 3.8; must be built from source on RHEL 7)" ;;
+        8) required_version="3.8.12"; required_minor=8; required_patch=12 ;;
+        9) required_version="3.9.14"; required_minor=9; required_patch=14 ;;
+        *) required_version="3.8.12 or 3.9.14 depending on OS (see doc)"; required_minor=8; required_patch=12 ;;
+    esac
+
+    # The interpreter CM agents will actually invoke. This script is run as
+    # root on target hosts, so "command -v python3" resolves the same way the
+    # CM agent sees it (not a user-level venv/pyenv shim).
+    local python3_bin
+    python3_bin=$(command -v python3 2>/dev/null)
+    if [ -z "$python3_bin" ]; then
+        state "Python: python3 not found on PATH. CDP requires Python 3 (minimum $required_version). Install python3 via the OS package manager (e.g. dnf install python3) or from source." 1
+        return 1
+    fi
+
+    # Older Python 3 builds print the version to stderr, so capture both.
+    local active_version
+    active_version=$("$python3_bin" --version 2>&1 | awk '{print $2}')
+
+    # Enumerate all python3.x interpreters on the host, not just the one
+    # first on PATH: RHEL hosts can have multiple (e.g. python3.6 from the OS
+    # plus python39/python3.11 module streams) and Cloudera Manager picks
+    # the interpreter per host configuration. Sources:
+    #  - "alternatives" symlinks (RHEL's update-alternatives registry)
+    #  - /usr/bin/python3.* and /usr/local/bin/python3.* convention
+    local -a found=()
+    local -a versions=()
+    local -a scan_paths=()
+    local p
+    # alternatives --list format: "name auto priority path" (RHEL 8/9) or
+    # tab-separated columns on RHEL 7; just take the path column and filter
+    # for python3 executables.
+    while read -r p; do
+        [ -n "$p" ] && scan_paths+=("$p")
+    done <<< "$(alternatives --list 2>/dev/null | awk '$1 ~ /^python3/ {print $NF}')"
+    # shellcheck disable=SC2045
+    for p in $(ls -d /usr/bin/python3.* /usr/local/bin/python3.* 2>/dev/null); do
+        if [ -x "$p" ] && [ ! -L "$p" ]; then
+            scan_paths+=("$p")
+        fi
+    done
+    # Keep real executables, deduplicated (the python3.6 "binaries" under
+    # /usr/bin can be symlinks; the version probe skips anything that does
+    # not report a version).
+    local seen=''
+    local v
+    for p in "${scan_paths[@]}"; do
+        [ -x "$p" ] || continue
+        case "$seen" in *"|$p|"*) continue ;; esac
+        seen="|$p|${seen}"
+        v=$("$p" --version 2>&1 | awk '{print $2}')
+        [ -z "$v" ] && continue
+        found+=("$p")
+        versions+=("$v")
+    done
+
+    # Report every detected interpreter with its path.
+    local i
+    for i in "${!versions[@]}"; do
+        state "Python: ${found[$i]} -> ${versions[$i]}" 0
+    done
+
+    # Validate the active PATH-resolved interpreter against the doc floor for
+    # this OS. Version string form: "3.8.12", "3.9.14", "3.11.4", or even
+    # "3.8" (patch omitted). A version on a NEWER minor than the required
+    # line passes regardless of patch number (Support Matrix supports
+    # 3.9-3.11 on SP1); the patch floor only bites on the required minor
+    # itself (e.g. 3.8.x < 3.8.12 on RHEL 8).
+    local active_minor active_patch
+    active_minor=$(echo "$active_version" | cut -d. -f2)
+    active_patch=$(echo "$active_version" | cut -d. -f3)
+    local unsupported_reason=""
+    if [ -z "$active_minor" ]; then
+        unsupported_reason="could not parse version from '$python3_bin --version' (got '$active_version')"
+    elif [ "$active_minor" -lt "$required_minor" ]; then
+        unsupported_reason="Python $active_version is below the required Python 3.$required_minor ($required_version) for this OS"
+    elif [ "$active_minor" -eq "$required_minor" ] && [ -n "$active_patch" ] && [ "$active_patch" -lt "$required_patch" ]; then
+        unsupported_reason="Python $active_version is below the minimum patch level ($required_version)"
+    fi
+
+    if [ -n "$unsupported_reason" ]; then
+        state "Python: $python3_bin is $active_version — $unsupported_reason. See https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-cm-install-python-3.8.html" 1
+        return 1
+    fi
+
+    # Active interpreter meets the floor. If other python3.x interpreters
+    # exist that are below the floor, warn: CM agent configuration may point
+    # at any of them.
+    for i in "${!versions[@]}"; do
+        local v_minor v_patch
+        v_minor=$(echo "${versions[$i]}" | cut -d. -f2)
+        v_patch=$(echo "${versions[$i]}" | cut -d. -f3)
+        if [ -n "$v_minor" ] && { [ "$v_minor" -lt "$required_minor" ] || { [ "$v_minor" -eq "$required_minor" ] && [ -n "$v_patch" ] && [ "$v_patch" -lt "$required_patch" ]; }; }; then
+            state "Python: additional interpreter ${found[$i]} is ${versions[$i]}, below the $required_version floor — fine unless CM is configured to use it" 2
+        fi
+    done
+
+    state "Python: Active python3 is $active_version at $python3_bin; required minimum for RHEL $rhel_major is $required_version" 0
 }
 
 function check_network() (
@@ -1428,12 +1732,37 @@ function check_network() (
 )
 
 function check_firewall() {
-    # http://www.cloudera.com/content/www/en-us/documentation/enterprise/latest/topics/install_cdh_disable_iptables.html
-    if is_centos_rhel_7; then
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-disabling-firewall.html
+    # "To disable the firewall on each host in your cluster, perform the
+    # following steps on each host." The RHEL-labelled step is
+    # "sudo systemctl disable firewalld" / "sudo systemctl stop firewalld"
+    # (labeled "RHEL 7 compatible" in the doc). The doc has no RHEL8/9-specific
+    # variant, but firewalld is the default firewall service on RHEL 8 and 9
+    # as well (the iptables service is not shipped as a systemd unit by
+    # default on RHEL 8/9), so the same firewalld check applies to 7/8/9.
+    # Non-RHEL/CentOS systems (older CentOS 6 etc.) keep the legacy iptables
+    # check.
+    if [ -n "$(get_centos_rhel_major_version)" ]; then
         _check_service_is_not_running 'Network' 'firewalld'
     else
         _check_service_is_not_running 'Network' 'iptables'
     fi
+}
+
+function check_fapolicyd() {
+    # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-before-you-install.html
+    # Caution note (verbatim): "Cloudera requires disabling the fapolicyd
+    # daemon present in RHEL 8 (and later) systems before beginning
+    # installation" of the Cloudera Manager application. "Improper
+    # configuration may render the system non-functional."
+    # fapolicyd does not exist on RHEL 7 and earlier, so this check is
+    # RHEL 8+ only.
+    local rhel_major
+    rhel_major=$(get_centos_rhel_major_version)
+    if [ -z "$rhel_major" ] || [ "$rhel_major" -lt 8 ]; then
+        return 0
+    fi
+    _check_service_is_not_running 'System' 'fapolicyd'
 }
 
 function check_virt() {
@@ -1451,7 +1780,9 @@ function checks() (
     check_virt
     check_network
     check_firewall
+    check_fapolicyd
     check_java
+    check_python
     check_database
     check_jdbc_connector
 )
@@ -1782,6 +2113,49 @@ function is_centos_rhel_9() {
     else
         return 1;
     fi
+}
+
+# Major version of a CentOS/RHEL system ("7", "8", "9", ...), empty string if
+# the system is not CentOS/RHEL. Prefer this over the is_centos_rhel_* boolean
+# helpers when a check needs to branch on more than one major version, so the
+# call sites don't grow into a widening chain of per-version booleans.
+# /etc/os-release is the canonical machine-readable source of the version on
+# RHEL/CentOS 7+ (VERSION_ID is e.g. "7.9" on RHEL7, "8.4" on RHEL8, "9.1" on
+# RHEL9) and is present on all supported releases.
+function get_centos_rhel_major_version() {
+    if [ ! -f /etc/redhat-release ]; then
+        return 1
+    fi
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        if [ -n "${VERSION_ID:-}" ]; then
+            echo "${VERSION_ID%%.*}"
+            return 0
+        fi
+    fi
+    # Fallback for systems without /etc/os-release: parse /etc/redhat-release
+    # e.g. "Red Hat Enterprise Linux Server release 7.9 (Maipo)"
+    sed -ne 's/.*release \([0-9][0-9]*\)\..*/\1/p' /etc/redhat-release
+}
+
+# Full major.minor version of a CentOS/RHEL system ("7.9", "8.4", "9.1", ...),
+# empty string if the system is not CentOS/RHEL or the version cannot be
+# determined. Used by checks that must branch on the minor version (e.g. the
+# RHEL minor-version support matrix for CDP 7.1.9 SP1).
+function get_centos_rhel_version() {
+    if [ ! -f /etc/redhat-release ]; then
+        return 1
+    fi
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        if [ -n "${VERSION_ID:-}" ]; then
+            echo "$VERSION_ID"
+            return 0
+        fi
+    fi
+    sed -ne 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' /etc/redhat-release
 }
 
 function reset_service_state() {
