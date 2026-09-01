@@ -112,6 +112,49 @@ function is_centos_rhel_9() {
     fi
 }
 
+# Major version of a CentOS/RHEL system ("7", "8", "9", ...), empty string if
+# the system is not CentOS/RHEL. Prefer this over the is_centos_rhel_* boolean
+# helpers when a check needs to branch on more than one major version, so the
+# call sites don't grow into a widening chain of per-version booleans.
+# /etc/os-release is the canonical machine-readable source of the version on
+# RHEL/CentOS 7+ (VERSION_ID is e.g. "7.9" on RHEL7, "8.4" on RHEL8, "9.1" on
+# RHEL9) and is present on all supported releases.
+function get_centos_rhel_major_version() {
+    if [ ! -f /etc/redhat-release ]; then
+        return 1
+    fi
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        if [ -n "${VERSION_ID:-}" ]; then
+            echo "${VERSION_ID%%.*}"
+            return 0
+        fi
+    fi
+    # Fallback for systems without /etc/os-release: parse /etc/redhat-release
+    # e.g. "Red Hat Enterprise Linux Server release 7.9 (Maipo)"
+    sed -ne 's/.*release \([0-9][0-9]*\)\..*/\1/p' /etc/redhat-release
+}
+
+# Full major.minor version of a CentOS/RHEL system ("7.9", "8.4", "9.1", ...),
+# empty string if the system is not CentOS/RHEL or the version cannot be
+# determined. Used by checks that must branch on the minor version (e.g. the
+# RHEL minor-version support matrix for CDP 7.1.9 SP1).
+function get_centos_rhel_version() {
+    if [ ! -f /etc/redhat-release ]; then
+        return 1
+    fi
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        if [ -n "${VERSION_ID:-}" ]; then
+            echo "$VERSION_ID"
+            return 0
+        fi
+    fi
+    sed -ne 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' /etc/redhat-release
+}
+
 function reset_service_state() {
     SERVICE_STATE['installed']=false
     SERVICE_STATE['running']=false
