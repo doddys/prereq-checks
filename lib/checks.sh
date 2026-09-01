@@ -516,40 +516,94 @@ function check_os() (
 )
 
 function check_database() {
-    local VERSION_PATTERN='([0-9][0-9]*\.[0-9][0-9]*)\.[0-9][0-9]*'
-    local mysql_ver=''
-    local mysql_rpm=''
-    local mysql_ent
-    local mysql_com
+    # Supported database versions for CDP Private Cloud Base 7.1.9 SP1
+    # (Cloudera Support Matrix, https://supportmatrix.cloudera.com/,
+    # CDP Private Cloud Base -> 7.1.9 SP1 -> Databases, read 2026-09-01):
+    #   MySQL:    8.4, 8.0, 5.7         (5.6 supported on base 7.1.9 but NOT on SP1)
+    #   MariaDB:  10.11, 10.6, 10.5, 10.4 (10.3 and 10.2 NOT supported on SP1)
+    #   PostgreSQL: 17, 16, 15, 14, 13, 12 (11 and 10 NOT supported on SP1)
+    #   OracleDB: 23c, 21c, 19c, 19, RAC 19
+    # Notes:
+    # - These are the versions supported as the Cloudera Manager / cluster
+    #   backend. Only a server installed locally (same host as Cloudera
+    #   Manager) can be detected here; a backend on a remote host is not
+    #   visible to this check.
+    # - OracleDB is not RPM-detectable on cluster hosts (an Oracle backend
+    #   normally runs on its own server); the JDBC/connector check and the
+    #   Cloudera Manager install wizard cover it, so this check skips it.
 
-    mysql_ent=$(rpm -q --queryformat='%{VERSION}' mysql-commercial-server)
+    # Report on a single server RPM. $1: engine label, $2: rpm name,
+    # $3: supported-version list (comma-separated, no spaces), $4: rpm
+    # version string, $5: "major" to compare only the major version
+    # (PostgreSQL) or "major.minor" (default; MySQL/MariaDB).
+    function report_db_version() {
+        local engine="$1"
+        local rpm_name="$2"
+        local supported_list="$3"
+        local rpm_version="$4"
+        local version_mode="${5:-major.minor}"
+        local ver
+        if [[ $version_mode == major ]]; then
+            [[ $rpm_version =~ ([0-9]+) ]] || return 1
+            ver=${BASH_REMATCH[1]}
+        else
+            # RPM VERSION fields are usually X.Y.Z, but module/Software-
+            # Collection builds can carry X.Y only — compare major.minor.
+            [[ $rpm_version =~ ([0-9]+)\.([0-9]+) ]] || return 1
+            ver="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+        fi
+        local rpm_full
+        rpm_full=$(rpm -q "$rpm_name")
+        # NB: a case pattern cannot be built from a variable (the "|"
+        # alternation is parsed, not expanded), so match by containment
+        # against the comma-delimited list instead.
+        if [[ ",$supported_list," == *",$ver,"* ]]; then
+            state "Database: Supported $engine server installed ($ver). $rpm_full" 0
+        else
+            state "Database: Unsupported $engine server installed ($ver). $rpm_full (supported on CDP 7.1.9 SP1: $(echo "$supported_list" | tr ',' ' '))" 1
+        fi
+        return 0
+    }
+
+    local found_any=false
+    local rpm_version
+
+    for rpm_name in mysql-commercial-server mysql-community-server; do
+        rpm_version=$(rpm -q --queryformat='%{VERSION}' "$rpm_name" 2>/dev/null)
+        # shellcheck disable=SC2181
+        if [[ $? -eq 0 ]] && report_db_version 'MySQL' "$rpm_name" '8.4,8.0,5.7' "$rpm_version"; then
+            found_any=true
+        fi
+    done
+
+    rpm_version=$(rpm -q --queryformat='%{VERSION}' mariadb-server 2>/dev/null)
     # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]]; then
-        mysql_rpm=$(rpm -q mysql-commercial-server)
-        [[ $mysql_ent =~ $VERSION_PATTERN ]]
-        mysql_ver=${BASH_REMATCH[1]}
+    if [[ $? -eq 0 ]] && report_db_version 'MariaDB' 'mariadb-server' '10.11,10.6,10.5,10.4' "$rpm_version"; then
+        found_any=true
     fi
 
-    mysql_com=$(rpm -q --queryformat='%{VERSION}' mysql-community-server)
-    # shellcheck disable=SC2181
-    if [[ $? -eq 0 ]]; then
-        mysql_rpm=$(rpm -q mysql-community-server)
-        [[ $mysql_com =~ $VERSION_PATTERN ]]
-        mysql_ver=${BASH_REMATCH[1]}
-    fi
-    if [[ -z "$mysql_ver" ]]; then
-        state "Database: MySQL server not installed, skipping version check" 2
-        return
-    fi
+    # PostgreSQL server RPM naming varies by repo: "postgresql-server"
+    # (RHEL app-stream), "postgresqlNN-server" (PGDG), or
+    # "rh-postgresqlNN-postgresql-server" (Software Collections). Querying
+    # this bounded candidate list directly is more reliable than parsing
+    # names back out of "rpm -qa" output (which embeds version-release).
+    local pg_rpm_name
+    # shellcheck disable=SC2013
+    for pg_rpm_name in postgresql-server \
+                       postgresql12-server postgresql13-server postgresql14-server \
+                       postgresql15-server postgresql16-server postgresql17-server \
+                       rh-postgresql12-postgresql-server rh-postgresql13-postgresql-server \
+                       rh-postgresql14-postgresql-server rh-postgresql15-postgresql-server; do
+        rpm_version=$(rpm -q --queryformat='%{VERSION}' "$pg_rpm_name" 2>/dev/null)
+        # shellcheck disable=SC2181
+        if [[ $? -eq 0 ]] && report_db_version 'PostgreSQL' "$pg_rpm_name" '17,16,15,14,13,12' "$rpm_version" 'major'; then
+            found_any=true
+        fi
+    done
 
-    case "$mysql_ver" in
-        '5.1'|'5.5'|'5.6'|'5.7')
-            state "Database: Supported MySQL server installed. $mysql_rpm" 0
-            ;;
-        *)
-            state "Database: Unsupported MySQL server installed. $mysql_rpm" 1
-            ;;
-    esac
+    if [[ $found_any == false ]]; then
+        state "Database: No database server RPM installed locally, skipping version check (remote backends are not detected here)" 2
+    fi
 }
 
 function check_jdbc_connector() {
