@@ -39,30 +39,10 @@ function check_java() {
       '/usr/lib/jvm/zulu11'
       '/usr/lib/jvm/java-11-zulu-openjdk'
     )
-    local JAVA6_HOME_CANDIDATES=(
-        '/usr/lib/j2sdk1.6-sun'
-        '/usr/lib/jvm/java-6-sun'
-        '/usr/lib/jvm/java-1.6.0-sun-1.6.0'
-        '/usr/lib/jvm/j2sdk1.6-oracle'
-        '/usr/lib/jvm/j2sdk1.6-oracle/jre'
-        '/usr/java/jdk1.6'
-        '/usr/java/jre1.6'
-    )
-    local OPENJAVA6_HOME_CANDIDATES=(
-        '/usr/lib/jvm/java-1.6.0-openjdk'
-        '/usr/lib/jvm/jre-1.6.0-openjdk'
-    )
-    local JAVA7_HOME_CANDIDATES=(
-        '/usr/java/jdk1.7'
-        '/usr/java/jre1.7'
-        '/usr/lib/jvm/j2sdk1.7-oracle'
-        '/usr/lib/jvm/j2sdk1.7-oracle/jre'
-        '/usr/lib/jvm/java-7-oracle'
-    )
-    local OPENJAVA7_HOME_CANDIDATES=(
-        '/usr/lib/jvm/java-1.7.0-openjdk'
-        '/usr/lib/jvm/java-7-openjdk'
-    )
+    # JDK 6 and 7 candidate paths are intentionally gone: the supported JDK
+    # floor for CDP Private Cloud Base 7.1.9 is JDK 8 (Support Matrix,
+    # CDP 7.1.9 SP1: OpenJDK/OracleJDK/AzulJDK all list JDK 8 as the lowest
+    # supported line; JDK 6/7 do not appear for any vendor).
     local JAVA8_HOME_CANDIDATES=(
       '/usr/java/jdk1.8'
       '/usr/java/jdk8'
@@ -90,21 +70,17 @@ function check_java() {
     local JAVA_HOME_CANDIDATES=(
         "${JAVA17_HOME_CANDIDATES[@]}"
         "${JAVA11_HOME_CANDIDATES[@]}"
-        "${JAVA7_HOME_CANDIDATES[@]}"
         "${JAVA8_HOME_CANDIDATES[@]}"
-        "${JAVA6_HOME_CANDIDATES[@]}"
         "${MISCJAVA_HOME_CANDIDATES[@]}"
         "${OPENJAVA17_HOME_CANDIDATES[@]}"
         "${OPENJAVA11_HOME_CANDIDATES[@]}"
-        "${OPENJAVA7_HOME_CANDIDATES[@]}"
         "${OPENJAVA8_HOME_CANDIDATES[@]}"
-        "${OPENJAVA6_HOME_CANDIDATES[@]}"
     )
 
     function get_jdk_type() {
        java=$1
-       JDK_TYPE=$($java -version 2>&1 | head -2 | tail -1 | awk '{print $1}') 
-  
+       JDK_TYPE=$($java -version 2>&1 | head -2 | tail -1 | awk '{print $1}')
+
        case $JDK_TYPE in
            Java\(TM\) )
                echo "Oracle";;
@@ -121,9 +97,27 @@ function check_java() {
     }
 
     # https://docs.cloudera.com/cdp-private-cloud-base/7.1.9/installation/topics/cdpdc-java-requirements.html
-    # JDK 8 minimum required version is 1.8u181
-    # OpenJDK 8 minimum required version is 1.8u232
-    # Azul JDK 8 minimum required version is 8.56.0.21
+    # Supported JDK lines for CDP Private Cloud Base 7.1.9 (same for 7.1.9
+    # SP1, Support Matrix): Oracle JDK 8/11/17, OpenJDK 8/11/17, Azul JDK
+    # 8/11/17. JDK 21 is NOT supported for any vendor (Support Matrix,
+    # CDP 7.1.9 SP1).
+    # Minimum versions (cdpdc-java-requirements.html):
+    #   JDK 8:  Oracle 1.8u181 (minimum required version)
+    #           OpenJDK 1.8u232 (minimum required version; 1.8u231 is the
+    #                            minimum for FIPS)
+    #           Azul 8.56.0.21 (minimum required version)
+    #   JDK 11: no general minimum version is documented. Tested/recommended
+    #           builds listed by the doc: Oracle 11.0.10+8, OpenJDK
+    #           11.0.4+11 (11.0.3 is the minimum for FIPS), Azul 11.50.19.
+    #   JDK 17: no general minimum version is documented. Tested/recommended
+    #           builds listed by the doc: Oracle 17.0.6, OpenJDK 17.0.7
+    #           (17.0.2 is the minimum for FIPS), Azul 17.0.7.
+    # TODO: task.md records an "Azul JDK 17 minimum build 11.50.19+" from the
+    # Support Matrix, but 11.50.19 is the Azul JDK *11* build per the doc
+    # above; the Azul JDK 17 tested build is 17.0.7. No authoritative Azul
+    # JDK 17 minimum build could be confirmed — the check therefore applies
+    # no Azul-specific JDK 17 floor, and this is flagged for manual
+    # verification in the PR.
     java_found=false
     for candidate_regex in "${JAVA_HOME_CANDIDATES[@]}"; do
         # shellcheck disable=SC2045,SC2086
@@ -131,64 +125,92 @@ function check_java() {
             if [ -x "$candidate/bin/java" ]; then
                 java_found=true
                 JDK_VERSION=$($candidate/bin/java -version 2>&1 | head -1 | awk '{print $3}' | tr -d '"')
-                JDK_VERSION_REGEX='(1|11)\.([0-9])\.([0-9_]*)'
-                JDK_8_MINOR_VERSION_REGEX='1\.8\.0_([0-9]*)'
+                # Legacy scheme up to JDK 8: "1.8.0_311" (also "1.7.0_80" etc.)
+                # Modern scheme JDK 9+: "11.0.20", "17.0.9", "21.0.1".
+                JDK_LEGACY_VERSION_REGEX='^1\.([0-9]+)\.'
+                JDK_MODERN_VERSION_REGEX='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+                JDK_8_UPDATE_REGEX='^1\.8\.0_([0-9]+)'
+                JDK_MODERN_VERSION_REGEX='^([0-9]+)\.([0-9]+)\.([0-9]+)'
+                JDK_8_UPDATE_REGEX='^1\.8\.0_([0-9]+)'
                 JDK_TYPE=$(get_jdk_type "$candidate/bin/java")
                 support=true
 
-                if [[ $JDK_VERSION =~ $JDK_VERSION_REGEX ]]; then
-                    if [[ ${BASH_REMATCH[1]} -eq 1 ]]; then
-                        if [[ ${BASH_REMATCH[2]} -eq 8 ]]; then
-                            if [[ $JDK_TYPE == "Azul" ]]; then
-                                # Azul JDK 1.8.0_XXX
-                                # Azul JDK uses a different build versioning convention
-                                AZUL_BUILD=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $5}' | cut -d'-' -f1)
-                                AZUL_BUILD_REGEX='8\.([0-9]*)\.([0-9]*)\.([0-9]*)'
-                                if [[ $AZUL_BUILD =~ $AZUL_BUILD_REGEX ]]; then
-                                    # Check if Azul build is lower than 8.56.0.21 which is the minimum required version
-                                    if [[ ${BASH_REMATCH[1]} -lt 56 ]]; then
-                                        support=false
-                                    elif [[ ${BASH_REMATCH[1]} -eq 56 ]] && [[ ${BASH_REMATCH[3]} -lt 21 ]]; then
-                                        support=false
-                                    else
-                                        support=true
-                                    fi
-                                else
-                                    support=false
-                                fi
+                if [[ $JDK_VERSION =~ $JDK_LEGACY_VERSION_REGEX ]]; then
+                    jdk_major=${BASH_REMATCH[1]}
+                    if [[ $jdk_major -ne 8 ]]; then
+                        # Only JDK 8 remains supported on the legacy 1.x
+                        # scheme (Support Matrix, CDP 7.1.9 SP1).
+                        support=false
+                    elif [[ $JDK_TYPE == "Azul" ]]; then
+                        # Azul JDK 1.8.0_XXX
+                        # Azul JDK uses a different build versioning convention
+                        AZUL_BUILD=$($candidate/bin/java -version 2>&1 | head -2 | tail -1 | awk '{print $5}' | cut -d'-' -f1)
+                        AZUL_BUILD_REGEX='8\.([0-9]*)\.([0-9]*)\.([0-9]*)'
+                        if [[ $AZUL_BUILD =~ $AZUL_BUILD_REGEX ]]; then
+                            # Check if Azul build is lower than 8.56.0.21 which is the minimum required version
+                            if [[ ${BASH_REMATCH[1]} -lt 56 ]]; then
+                                support=false
+                            elif [[ ${BASH_REMATCH[1]} -eq 56 ]] && [[ ${BASH_REMATCH[3]} -lt 21 ]]; then
+                                support=false
                             else
-                                # Oracle or OpenJDK 1.8.0_XXX
-                                if [[ $JDK_VERSION =~ $JDK_8_MINOR_VERSION_REGEX ]]; then
-                                    if [[ $JDK_TYPE == "Oracle" ]] && [[ ${BASH_REMATCH[1]} -lt 181 ]]; then
-                                        support=false
-                                    elif [[ $JDK_TYPE == "OpenJDK" ]] && [[ ${BASH_REMATCH[1]} -lt 232 ]]; then
-                                        support=false
-                                    else
-                                        support=true
-                                    fi
-                                else
-                                    support=false
-                                fi
+                                support=true
                             fi
-                        else
-                             support=false
-                        fi
-                    elif [[ ${BASH_REMATCH[1]} -eq 11 ]]; then
-                        # Oracle, OpenJDK and Azul Java 11 are all supported
-                        if [[ $JDK_TYPE != "Unknown" ]]; then
-                            support=true
                         else
                             support=false
                         fi
                     else
-                        support=false
+                        # Oracle or OpenJDK 1.8.0_XXX
+                        if [[ $JDK_VERSION =~ $JDK_8_UPDATE_REGEX ]]; then
+                            if [[ $JDK_TYPE == "Oracle" ]] && [[ ${BASH_REMATCH[1]} -lt 181 ]]; then
+                                support=false
+                            elif [[ $JDK_TYPE == "OpenJDK" ]] && [[ ${BASH_REMATCH[1]} -lt 232 ]]; then
+                                support=false
+                            else
+                                support=true
+                            fi
+                        else
+                            support=false
+                        fi
                     fi
+                elif [[ $JDK_VERSION =~ $JDK_MODERN_VERSION_REGEX ]]; then
+                    jdk_major=${BASH_REMATCH[1]}
+                    case $jdk_major in
+                        11)
+                            # Oracle, OpenJDK and Azul Java 11 are all supported;
+                            # no general minimum version is documented (see
+                            # comment above for the tested/recommended builds).
+                            if [[ $JDK_TYPE != "Unknown" ]]; then
+                                support=true
+                            else
+                                support=false
+                            fi
+                            ;;
+                        17)
+                            # Oracle, OpenJDK and Azul Java 17 are all supported
+                            # (Support Matrix, CDP 7.1.9 SP1). No general
+                            # minimum version is documented (see comment above
+                            # for the tested builds and the Azul TODO).
+                            if [[ $JDK_TYPE != "Unknown" ]]; then
+                                support=true
+                            else
+                                support=false
+                            fi
+                            ;;
+                        21)
+                            # JDK 21 is NOT supported for any vendor (Support
+                            # Matrix, CDP 7.1.9 SP1).
+                            support=false
+                            ;;
+                        *)
+                            support=false
+                            ;;
+                    esac
+                else
+                    support=false
+                fi
 
-                    if [[ $support == true ]]; then
-                        state "Java: Supported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 0
-                    else
-                        state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
-                    fi
+                if [[ $support == true ]]; then
+                    state "Java: Supported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 0
                 else
                     state "Java: Unsupported $JDK_TYPE Java $JDK_VERSION: ${candidate}/bin/java" 1
                 fi
