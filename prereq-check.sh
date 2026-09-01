@@ -1904,6 +1904,17 @@ function print_disks() (
     fi
 )
 
+function print_lsblk() {
+    echo "lsblk:"
+    if command -v lsblk >/dev/null 2>&1; then
+        lsblk 2>/dev/null | while read -r line; do
+            pad; echo "$line"
+        done
+    else
+        pad; echo "lsblk not found"
+    fi
+}
+
 function print_free_space() (
     function free_space() {
         # Pick "Avail" column as "Free space:"
@@ -1993,6 +2004,7 @@ function system_info() {
     print_cpu_and_ram
     print_swap
     print_disks
+    print_lsblk
     print_free_space
     print_cloudera_rpms
     print_time
