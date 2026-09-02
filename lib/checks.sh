@@ -1076,7 +1076,9 @@ function check_data_disk_mounts() {
     # - ext4: reduce the superuser block reservation from the 5% default
     #   to 1% ("-m1" at mkfs time).
     # - "Drives should be mounted in the /etc/fstab filesystem table
-    #   using the noatime option."
+    #   using the noatime option." (also the source for the /etc/fstab
+    #   persistence check below — the doc's own phrasing implies fstab,
+    #   not just a transient `mount` command.)
     #
     # This guidance is sourced from HDFS/DataNode docs specifically, but
     # is applied here to every additional local data-disk mount found on
@@ -1101,6 +1103,7 @@ function check_data_disk_mounts() {
     # one of this host's standard OS partitions.
     local -a system_mounts=(/ /boot /boot/efi /home /opt /opt/cloudera /tmp /usr /usr/hdp /var /var/lib /var/log)
 
+    local found_disk=false
     local line source target fstype options is_system m
     while IFS= read -r line; do
         read -r source target fstype options <<< "$line"
@@ -1113,6 +1116,7 @@ function check_data_disk_mounts() {
         done
         $is_system && continue
 
+        found_disk=true
         local msg_prefix="System: data disk $target ($source, $fstype)"
 
         case "$fstype" in
@@ -1130,6 +1134,26 @@ function check_data_disk_mounts() {
             state "$msg_prefix not mounted with noatime (Cloudera recommendation)" 2
         fi
 
+        # A mount that's live but missing from /etc/fstab is transient —
+        # it silently disappears on reboot, which for a data disk means
+        # the service using it (DataNode, NodeManager, etc.) either fails
+        # to start or starts writing into the empty mountpoint directory
+        # on the root filesystem instead. Match by mountpoint (field 2),
+        # not by device/UUID: fstab commonly references the same disk via
+        # UUID=/LABEL= while findmnt reports the resolved /dev path, so
+        # matching on the device string would false-negative on a
+        # correctly configured host.
+        if awk -v mp="$target" '
+                /^[[:space:]]*#/ { next }
+                NF < 2 { next }
+                $2 == mp { found=1 }
+                END { exit !found }
+            ' /etc/fstab 2>/dev/null; then
+            state "$msg_prefix is in /etc/fstab (persists across reboot)" 0
+        else
+            state "$msg_prefix is NOT in /etc/fstab — mount will not survive a reboot" 2
+        fi
+
         if [ "$fstype" = "ext4" ]; then
             local resv_pct
             resv_pct=$(tune2fs -l "$source" 2>/dev/null | \
@@ -1141,6 +1165,73 @@ function check_data_disk_mounts() {
             fi
         fi
     done < <(findmnt -lno source,target,fstype,options | grep '^/dev')
+
+    if ! $found_disk; then
+        state "System: no additional data disk mounts found (only OS partitions) — see check below for unmounted disks that may need to be added" 2
+    fi
+}
+
+function check_unmounted_disks() {
+    # Complements check_data_disk_mounts above, which only evaluates disks
+    # that ARE mounted: flags block devices that look like an available
+    # data disk (a whole disk with no partitions, or a partition) but
+    # aren't mounted anywhere at all — commonly a disk that was
+    # provisioned and/or formatted but never added to /etc/fstab, or never
+    # partitioned/formatted in the first place. This is general disk-
+    # inventory reasoning from lsblk, not a specific docs.cloudera.com
+    # threshold.
+    #
+    # Skips: removable media (RM=1, e.g. optical drives), loop devices,
+    # and filesystem types that are legitimately "unmounted" by design —
+    # swap, and LVM/RAID/LUKS member devices that are consumed by another
+    # layer rather than mounted directly.
+    #
+    # lsblk -P output is designed for exactly this kind of scripted
+    # consumption: each field is emitted as a shell-quoted KEY="VALUE"
+    # pair (including explicit empty-string values), so `eval` on a line
+    # safely sets local variables without the column-misalignment problem
+    # plain `lsblk -r`/awk parsing has whenever a field (like an empty
+    # MOUNTPOINT) is blank.
+    local -a skip_fstypes=(swap LVM2_member linux_raid_member crypto_LUKS)
+    local -a lsblk_lines=()
+    local line
+    while IFS= read -r line; do
+        [ -n "$line" ] && lsblk_lines+=("$line")
+    done < <(lsblk -Pno NAME,TYPE,MOUNTPOINT,FSTYPE,SIZE,RM,PKNAME 2>/dev/null)
+
+    local NAME TYPE MOUNTPOINT FSTYPE SIZE RM PKNAME
+    local this_name this_type this_mountpoint this_fstype this_size this_rm
+    for line in "${lsblk_lines[@]}"; do
+        NAME=""; TYPE=""; MOUNTPOINT=""; FSTYPE=""; SIZE=""; RM=""; PKNAME=""
+        eval "$line"
+        this_name="$NAME"; this_type="$TYPE"; this_mountpoint="$MOUNTPOINT"
+        this_fstype="$FSTYPE"; this_size="$SIZE"; this_rm="$RM"
+
+        { [ "$this_type" = "disk" ] || [ "$this_type" = "part" ]; } || continue
+        [ "$this_rm" = "1" ] && continue
+        [ -n "$this_mountpoint" ] && continue
+
+        local skip=false sf
+        for sf in "${skip_fstypes[@]}"; do
+            [ "$this_fstype" = "$sf" ] && skip=true && break
+        done
+        $skip && continue
+
+        # A whole disk with partitions isn't itself "unmounted" — its
+        # partitions are what matter, and they're evaluated separately as
+        # their own lsblk lines.
+        if [ "$this_type" = "disk" ]; then
+            local has_child=false line2
+            for line2 in "${lsblk_lines[@]}"; do
+                NAME=""; TYPE=""; MOUNTPOINT=""; FSTYPE=""; SIZE=""; RM=""; PKNAME=""
+                eval "$line2"
+                [ "$PKNAME" = "$this_name" ] && has_child=true && break
+            done
+            $has_child && continue
+        fi
+
+        state "System: /dev/$this_name ($this_size, ${this_fstype:-no filesystem}) is not mounted anywhere — available disk not in use" 2
+    done
 }
 
 function check_krb5_realms() {
@@ -1228,6 +1319,7 @@ function checks() (
     check_sudo
     check_opt_cloudera_disk_space
     check_data_disk_mounts
+    check_unmounted_disks
     check_virt
     check_network
     check_firewall
