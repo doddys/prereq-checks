@@ -2027,16 +2027,36 @@ function check_unmounted_disks() {
     done < <(lsblk -Pno NAME,TYPE,MOUNTPOINT,FSTYPE,SIZE,RM,PKNAME 2>/dev/null)
 
     local NAME TYPE MOUNTPOINT FSTYPE SIZE RM PKNAME
-    local this_name this_type this_mountpoint this_fstype this_size this_rm
+    local this_name this_type this_mountpoint this_fstype this_size this_rm this_pkname
+
+    # Figure out which whole disk the OS itself lives on, so its other
+    # partitions (BIOS boot partition, EFI system partition, etc. — often
+    # tiny, unformatted, and legitimately never mounted) aren't mistaken
+    # for spare/unused data disks. False positive hit in practice: a 1MB
+    # nvme0n1p1 BIOS-boot-style partition sitting next to the root
+    # partition (nvme0n1p3) on the same physical OS disk (nvme0n1) was
+    # flagged as "available disk not in use" — it's part of the OS disk's
+    # own partition table, not a spare disk.
+    local os_disk=""
+    for line in "${lsblk_lines[@]}"; do
+        NAME=""; TYPE=""; MOUNTPOINT=""; FSTYPE=""; SIZE=""; RM=""; PKNAME=""
+        eval "$line"
+        if [ "$MOUNTPOINT" = "/" ]; then
+            os_disk="${PKNAME:-$NAME}"
+            break
+        fi
+    done
+
     for line in "${lsblk_lines[@]}"; do
         NAME=""; TYPE=""; MOUNTPOINT=""; FSTYPE=""; SIZE=""; RM=""; PKNAME=""
         eval "$line"
         this_name="$NAME"; this_type="$TYPE"; this_mountpoint="$MOUNTPOINT"
-        this_fstype="$FSTYPE"; this_size="$SIZE"; this_rm="$RM"
+        this_fstype="$FSTYPE"; this_size="$SIZE"; this_rm="$RM"; this_pkname="$PKNAME"
 
         { [ "$this_type" = "disk" ] || [ "$this_type" = "part" ]; } || continue
         [ "$this_rm" = "1" ] && continue
         [ -n "$this_mountpoint" ] && continue
+        [ -n "$os_disk" ] && { [ "$this_name" = "$os_disk" ] || [ "$this_pkname" = "$os_disk" ]; } && continue
 
         local skip=false sf
         for sf in "${skip_fstypes[@]}"; do
@@ -2084,8 +2104,22 @@ function check_data_dir_on_os_disk() {
     #
     # Naming-convention heuristic only (pre-install, no HDFS/Kafka/NiFi
     # config exists yet to read the real configured paths from).
+    #
+    # A shared parent directory (e.g. /data, holding /data/01, /data/02
+    # as separate real mounts underneath it) is NOT itself a mountpoint
+    # and would otherwise false-positive here on every host using that
+    # very common per-disk-subdirectory layout — false positive hit in
+    # practice: /data flagged even though /data/01 was a correctly
+    # mounted, correctly configured disk. So: only flag a candidate if it
+    # has no mounted disk anywhere underneath it either.
     local root_dev
     root_dev=$(findmnt -no SOURCE /)
+
+    local -a all_mountpoints=()
+    local mp
+    while IFS= read -r mp; do
+        [ -n "$mp" ] && all_mountpoints+=("$mp")
+    done < <(findmnt -lno TARGET)
 
     local -a candidates=()
     local d
@@ -2093,12 +2127,20 @@ function check_data_dir_on_os_disk() {
         [ -d "$d" ] && candidates+=("$d")
     done
 
-    local dev
+    local dev has_mounted_child
     for d in "${candidates[@]}"; do
         dev=$(findmnt -T "$d" -no SOURCE 2>/dev/null | tail -1)
-        if [ -z "$dev" ] || [ "$dev" = "$root_dev" ]; then
-            state "System: $d looks like a data directory (naming convention) but has no dedicated disk mounted — it resides directly on the OS root filesystem ($root_dev). Mount a separate disk there before use" 1
-        fi
+        { [ -n "$dev" ] && [ "$dev" != "$root_dev" ]; } && continue
+
+        has_mounted_child=false
+        for mp in "${all_mountpoints[@]}"; do
+            case "$mp" in
+                "$d"/*) has_mounted_child=true; break ;;
+            esac
+        done
+        $has_mounted_child && continue
+
+        state "System: $d looks like a data directory (naming convention) but has no dedicated disk mounted — it resides directly on the OS root filesystem ($root_dev). Mount a separate disk there before use" 1
     done
 }
 
