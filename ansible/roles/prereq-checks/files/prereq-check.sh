@@ -2061,6 +2061,47 @@ function check_unmounted_disks() {
     done
 }
 
+function check_data_dir_on_os_disk() {
+    # Catches a real misconfiguration check_data_disk_mounts and
+    # check_unmounted_disks both structurally cannot see: a directory
+    # that LOOKS like it's meant to be a dedicated data mount (matches
+    # the same /data*, /kafka*, /nifi*, /grid, /disk*, /hadoop* naming
+    # conventions used elsewhere in this file) but was created with a
+    # plain `mkdir -p` and never actually had a disk mounted there —
+    # so it silently lives on the OS root filesystem. Both checks above
+    # only ever look at findmnt/lsblk output, i.e. things that already
+    # ARE (or exist as unmounted block devices); a directory with no
+    # backing mount at all is invisible to both. This is a real incident
+    # this repo has hit in training: a directory like /data/01 created
+    # directly on the OS disk, not mounted, passes every existing check
+    # because there's no mount to inspect — and then fails once cluster
+    # writes fill the (OS-sized, not data-sized) root filesystem.
+    #
+    # FAIL rather than WARN: unlike the mount-option/filesystem-type
+    # recommendations above, this isn't a performance tuning suggestion
+    # — a data directory silently sharing the OS disk risks taking the
+    # whole host down when it fills root, not just running suboptimally.
+    #
+    # Naming-convention heuristic only (pre-install, no HDFS/Kafka/NiFi
+    # config exists yet to read the real configured paths from).
+    local root_dev
+    root_dev=$(findmnt -no SOURCE /)
+
+    local -a candidates=()
+    local d
+    for d in /data* /data*/* /grid /grid/* /disk* /hadoop /hadoop/* /kafka* /kafka*/* /nifi*; do
+        [ -d "$d" ] && candidates+=("$d")
+    done
+
+    local dev
+    for d in "${candidates[@]}"; do
+        dev=$(findmnt -T "$d" -no SOURCE 2>/dev/null | tail -1)
+        if [ -z "$dev" ] || [ "$dev" = "$root_dev" ]; then
+            state "System: $d looks like a data directory (naming convention) but has no dedicated disk mounted — it resides directly on the OS root filesystem ($root_dev). Mount a separate disk there before use" 1
+        fi
+    done
+}
+
 function check_krb5_realms() {
     # KDC hostname resolution. In real CDP deployments the backing KDC is
     # very often Active Directory or FreeIPA, but kdc=/admin_server=
@@ -2147,6 +2188,7 @@ function checks() (
     check_opt_cloudera_disk_space
     check_data_disk_mounts
     check_unmounted_disks
+    check_data_dir_on_os_disk
     check_virt
     check_network
     check_firewall
